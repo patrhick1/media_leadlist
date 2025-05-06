@@ -1,13 +1,23 @@
 { pkgs }: {
   deps = [
-    pkgs.python311Packages.pip  # Installs pip for Python 3.11
-    pkgs.python311              # Installs Python 3.11 itself
-    pkgs.nodejs_20              # Installs Node.js version 20.x.x and npm
-    # You can specify other versions like pkgs.python310Packages.pip, pkgs.nodejs_18, etc.
+    pkgs.bash                     # Basic shell utilities
+    pkgs.libiconv                 # Character set conversion library, often a dependency
+    # pkgs.libxcrypt              # Cryptography library, include if issues persist or packages need it
+    
+    pkgs.python311                # Python 3.11
+    pkgs.python311Packages.pip    # Pip for Python 3.11
+    # Add other essential Python build tools if needed by specific packages in requirements.txt
+    # pkgs.python311Packages.setuptools 
+    # pkgs.python311Packages.wheel
+
+    pkgs.nodejs_20                # Node.js v20.x and npm
   ];
   env = {
-    PYTHONBIN = "${pkgs.python311}/bin/python3"; # Sets an environment variable for Python binary
-    PYTHON_SITE_PACKAGES = ".replit/pypoetry/lib/python3.11/site-packages"; # Common for Replit Python
-    MPLCONFIGDIR = "/tmp/matplotlib"; # Often needed if any package uses matplotlib
+    PYTHONBIN = "${pkgs.python311}/bin/python3.11"; # Be specific with python3.11
+    # Set common env vars that can help with builds
+    TERMINFO = "${pkgs.ncurses}/share/terminfo"; # For ncurses-based programs in shell
+    CONFIG_SHELL = "${pkgs.bash}/bin/bash";
+    PYTHON_LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.zlib ]; # Common libs
+    MPLCONFIGDIR = "/tmp/matplotlib";
   };
 } 
