@@ -1,13 +1,38 @@
 # .replit
-language = "bash" # Using bash as npm handles the build and python run
+
+# Explicitly state the primary language and modules needed
+language = "python3"
+modules = ["python-3.11", "nodejs-20", "bash"] # Using python-3.11
+
+# Main run command for the "Run" button in the IDE
+# UPM should handle installations based on requirements.txt and package.json
 run = "npm run start_prod"
 
-[deployment]
-run = ["npm", "run", "start_prod"]
-# Replit will detect Uvicorn running on port 8000 and make it available.
-# For autoscale deployments, ensure your Replit plan supports this.
-# Environment variables should be set in Replit Secrets.
+# Packaging configuration
+[packager]
+language = "python3" # Primary language for UPM
+# ignoredPackages = [] # If needed
 
+[packager.features]
+enabledForHosting = true
+packageSearch = true  # Allows UPM to search for packages
+guessImports = true   # UPM tries to install packages based on imports
+
+# Nix channel - this can significantly improve stability
+[nix]
+channel = "stable-23_11" # Or try stable-24_05 or comment out to use Replit default
+
+# Deployment configuration
+[deployment]
+run = ["bash", "-c", "npm run start_prod"]
+deploymentTarget = "cloudrun" # For Autoscale deployments
+
+# Port mapping for web services
+[[ports]]
+localPort = 8000      # The port your uvicorn server listens on
+externalPort = 80     # Standard HTTP port (Replit handles HTTPS)
+
+# Optional: Interpreter command for shell (can be simple)
 [interpreter]
 [interpreter.command]
-args = ["bash", "-c", "echo \"Python and Node.js environment ready. Use 'npm run start_prod' to run.\""] 
+args = ["bash", "-c", "echo \"Python 3.11 and Node.js 20 environment ready. Use 'npm run start_prod' to run.\""] 
