@@ -1,0 +1,41 @@
+{
+  "name": "podcast_vetting_agent",
+  "version": "1.0.0",
+  "description": "an agentic system for building a qualified podcast lead list. It's designed to help marketing or outreach coordinators discover, vet, and prioritize podcasts that match specific criteria for outreach campaigns.",
+  "author": "Paschal",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"uvicorn src.review_app.main:app --port 8000 --env-file .env\" \"npm run dev --prefix review_ui\"",
+    "start_prod": "npm run build --prefix review_ui && uvicorn src.review_app.main:app --host 0.0.0.0 --port 8000",
+    "list": "node scripts/dev.js list",
+    "generate": "node scripts/dev.js generate",
+    "parse-prd": "node scripts/dev.js parse-prd",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "lint": "eslint . --ext .ts",
+    "format": "prettier --write .",
+    "prepare": "husky install"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "boxen": "^8.0.1",
+    "chalk": "^4.1.2",
+    "cli-table3": "^0.6.5",
+    "commander": "^11.1.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.21.2",
+    "fastmcp": "^1.20.5",
+    "figlet": "^1.8.0",
+    "fuse.js": "^7.0.0",
+    "gradient-string": "^3.0.0",
+    "helmet": "^8.1.0",
+    "inquirer": "^12.5.0",
+    "jsonwebtoken": "^9.0.2",
+    "lru-cache": "^10.2.0",
+    "openai": "^4.89.0",
+    "ora": "^8.2.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

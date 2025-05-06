@@ -1,0 +1,13 @@
+# .replit
+language = "bash" # Using bash as npm handles the build and python run
+run = "npm run start_prod"
+
+[deployment]
+run = ["npm", "run", "start_prod"]
+# Replit will detect Uvicorn running on port 8000 and make it available.
+# For autoscale deployments, ensure your Replit plan supports this.
+# Environment variables should be set in Replit Secrets.
+
+[interpreter]
+[interpreter.command]
+args = ["bash", "-c", "echo \"Python and Node.js environment ready. Use 'npm run start_prod' to run.\""] 

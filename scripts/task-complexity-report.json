@@ -1,0 +1,83 @@
+{
+  "meta": {
+    "generatedAt": "2025-04-14T04:09:06.658Z",
+    "tasksAnalyzed": 9,
+    "thresholdScore": 5,
+    "projectName": "Your Project Name",
+    "usedResearch": false
+  },
+  "complexityAnalysis": [
+    {
+      "taskId": 2,
+      "taskTitle": "Implement Search Agent with Keyword Discovery",
+      "complexityScore": 7,
+      "recommendedSubtasks": 5,
+      "expansionPrompt": "Break down the Search Agent implementation into subtasks covering API client development, search functionality, result normalization, deduplication logic, and LangGraph integration. Include specific technical considerations for each subtask.",
+      "reasoning": "This task involves multiple API integrations with error handling, data normalization across sources, and integration into a workflow system. The complexity comes from handling different data formats, implementing rate limiting, and ensuring proper error handling across external services."
+    },
+    {
+      "taskId": 3,
+      "taskTitle": "Develop Vetting Agent with Basic Quality Assessment",
+      "complexityScore": 6,
+      "recommendedSubtasks": 5,
+      "expansionPrompt": "Divide the Vetting Agent development into subtasks covering quality assessment algorithms, configurable scoring system, tier assignment logic, explanation generation, and LangGraph workflow integration. Include data structures and evaluation criteria for each component.",
+      "reasoning": "This task requires developing algorithms for quality assessment with configurable parameters and a scoring system. The complexity is moderate as it involves creating evaluation logic, generating human-readable explanations, and integrating with the existing workflow."
+    },
+    {
+      "taskId": 4,
+      "taskTitle": "Build Basic Human Review Interface",
+      "complexityScore": 7,
+      "recommendedSubtasks": 6,
+      "expansionPrompt": "Break down the Human Review Interface development into subtasks covering FastAPI backend setup, React frontend components, approval/rejection functionality, filtering/sorting capabilities, UI Agent implementation, and data flow between components.",
+      "reasoning": "This task involves both frontend and backend development with multiple components. The complexity comes from creating a full-stack application with user interaction handling, data visualization, and integration with the agent workflow system."
+    },
+    {
+      "taskId": 5,
+      "taskTitle": "Implement Enrichment Agent for Metadata Collection",
+      "complexityScore": 8,
+      "recommendedSubtasks": 6,
+      "expansionPrompt": "Divide the Enrichment Agent implementation into subtasks covering RSS feed processing, social media discovery and analysis, data standardization and merging, audience size estimation, workflow integration, and error handling for external data sources.",
+      "reasoning": "This task has high complexity due to the variety of external data sources (RSS feeds, social media) that need to be processed, analyzed, and merged. The audience size estimation algorithms and handling of potentially unreliable external data add significant complexity."
+    },
+    {
+      "taskId": 6,
+      "taskTitle": "Develop Manual CRM Export Functionality",
+      "complexityScore": 5,
+      "recommendedSubtasks": 4,
+      "expansionPrompt": "Break down the CRM export functionality into subtasks covering field mapping definition, CSV generation logic, data validation and formatting, and export status tracking with error reporting.",
+      "reasoning": "This task is moderately complex, focusing on data transformation and export. The main challenges are ensuring proper field mapping, validation of required fields, and error handling, but it doesn't involve complex algorithms or external API integrations."
+    },
+    {
+      "taskId": 7,
+      "taskTitle": "Implement Advanced Discovery Methods",
+      "complexityScore": 8,
+      "recommendedSubtasks": 5,
+      "expansionPrompt": "Divide the advanced discovery methods implementation into subtasks covering podcast neighborhood mapping algorithms, guest shadowing discovery logic, result processing enhancements, targeted filtering implementation, and deduplication system improvements.",
+      "reasoning": "This task extends existing functionality with more sophisticated discovery methods that require complex relationship mapping and pattern recognition. The enhanced filtering and deduplication for increased volume and variety add significant complexity."
+    },
+    {
+      "taskId": 8,
+      "taskTitle": "Develop CRM Agent with Direct Attio Integration",
+      "complexityScore": 7,
+      "recommendedSubtasks": 5,
+      "expansionPrompt": "Break down the CRM Agent development into subtasks covering Attio API client implementation, direct lead export functionality, campaign tagging and organization, bidirectional sync logic, and error recovery mechanisms.",
+      "reasoning": "This task involves direct integration with an external CRM system API, requiring authentication, error handling, and bidirectional data synchronization. The complexity comes from ensuring reliable data transfer and handling potential API failures gracefully."
+    },
+    {
+      "taskId": 9,
+      "taskTitle": "Implement Analytics Agent for Performance Tracking",
+      "complexityScore": 8,
+      "recommendedSubtasks": 6,
+      "expansionPrompt": "Divide the Analytics Agent implementation into subtasks covering metrics collection system, performance analysis functions, dashboard visualization components, suggestion generation algorithms, campaign comparison functionality, and data storage architecture.",
+      "reasoning": "This task involves comprehensive data collection, analysis, visualization, and pattern recognition across the entire system. The complexity is high due to the breadth of metrics to track and the need to generate meaningful insights and improvement suggestions."
+    },
+    {
+      "taskId": 10,
+      "taskTitle": "Enhance Human Review Interface with Advanced Features",
+      "complexityScore": 7,
+      "recommendedSubtasks": 6,
+      "expansionPrompt": "Break down the enhanced review interface implementation into subtasks covering batch processing functionality, advanced filtering and sorting, improved data presentation, user preference management, keyboard shortcut implementation, and performance metrics visualization.",
+      "reasoning": "This task builds on the existing interface with more advanced features that increase the complexity. The batch processing, personalized views, and performance visualization require significant frontend and backend enhancements while maintaining a clean, usable interface."
+    }
+  ]
+}

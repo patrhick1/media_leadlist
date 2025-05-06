@@ -1,0 +1,52 @@
+# virtual environment
+.venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest cache
+.pytest_cache/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dev-debug.log
+
+# Dependency directories
+node_modules/
+
+# Environment variables
+.env
+
+# Editor directories and files
+.idea
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS specific
+.DS_Store
+
+# Task files
+tasks.json
+tasks/
+
+# Ignore all text files
+*.txt
+
+# Ignore all markdown files (except those in .cursor/rules if you want to keep them)
+*.md
+# If you want to keep .cursor/rules markdown files, uncomment the line below and adjust if needed
+# !.cursor/rules/**/*.md
+
+# Ignore task-master.ai files and directories
+task-master.ai/
+*task-master.ai*

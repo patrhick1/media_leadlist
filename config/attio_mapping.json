@@ -1,0 +1,91 @@
+{
+  "description": "Mapping from EnrichedPodcastProfile to Attio CSV import fields.",
+  "version": 1,
+  "target_object": "Company",
+  "mappings": [
+    {
+      "source_field": "name",
+      "attio_field": "Company Name",
+      "required": true,
+      "type": "text",
+      "notes": "Direct mapping from podcast name."
+    },
+    {
+      "source_field": "podcast_link",
+      "attio_field": "Domain",
+      "required": true,
+      "type": "text",
+      "notes": "Requires transformation: Extract domain from podcast_link URL."
+    },
+    {
+      "source_field": "description",
+      "attio_field": "Description",
+      "required": false,
+      "type": "text",
+      "notes": "Direct mapping."
+    },
+    {
+      "source_field": "image_url",
+      "attio_field": "Logo URL",
+      "required": false,
+      "type": "url",
+      "notes": "Mapping podcast image URL. Check Attio field name."
+    },
+    {
+      "source_field": "categories",
+      "attio_field": "Industry Tags",
+      "required": false,
+      "type": "multi-select",
+      "notes": "Requires transformation: Join list with ','. Check Attio field name/type."
+    },
+    {
+      "source_field": "language",
+      "attio_field": "Language",
+      "required": false,
+      "type": "text",
+      "notes": "Direct mapping. Check Attio field name/type."
+    },
+    {
+      "source_field": "episode_count",
+      "attio_field": "Episode Count",
+      "required": false,
+      "type": "number",
+      "notes": "Direct mapping. Requires custom field in Attio."
+    },
+    {
+      "source_field": "latest_episode_date",
+      "attio_field": "Last Activity Date",
+      "required": false,
+      "type": "date",
+      "notes": "Requires transformation: Format date to Attio's requirement (e.g., YYYY-MM-DD). Check Attio field name."
+    },
+    {
+      "source_field": "average_duration_seconds",
+      "attio_field": "Avg Episode Duration (sec)",
+      "required": false,
+      "type": "number",
+      "notes": "Direct mapping. Requires custom field in Attio."
+    },
+    {
+      "source_field": "social_profiles",
+      "attio_field": "LinkedIn Company URL",
+      "required": false,
+      "type": "url",
+      "notes": "Requires transformation: Extract LinkedIn URL where platform='linkedin' and format matches 'linkedin.com/company/...'."
+    },
+    {
+      "source_field": "email",
+      "attio_field": "Contact Email",
+      "required": false,
+      "type": "email",
+      "notes": "Maps to Person object. Required if creating a contact."
+    },
+    {
+      "source_field": "author",
+      "attio_field": "Contact Full Name",
+      "required": false,
+      "type": "text",
+      "notes": "Maps to Person object's name."
+    }
+  ]
+} 

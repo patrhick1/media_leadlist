@@ -1,0 +1,444 @@
+import logging
+from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from typing import TypedDict, List, Dict, Optional
+import uuid
+import time # Import time
+import asyncio # Add asyncio import at the top
+
+# Import our Pydantic state model
+from ..models.state import AgentState
+# Import the checkpointer
+from ..persistence.state_manager import get_checkpoint_saver
+# Import models for example usage
+from ..models.campaign import CampaignConfiguration
+# Import the actual agent
+from ..agents.search_agent import SearchAgent
+from ..agents.vetting_agent import VettingAgent
+from ..agents.enrichment_agent import EnrichmentAgent
+# Import CRMAgent
+from ..agents.crm_agent import CRMAgent
+# Import MetricsService
+from ..services.metrics_service import MetricsService
+# Import MongoDB access
+# from ..persistence.mongodb import _get_collection, LEADS_COLLECTION 
+# Import GraphState from the new file
+from .graph_types import GraphState
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# --- Define the State (MOVED to graph_types.py) --- #
+# class GraphState(TypedDict):
+#     agent_state: AgentState
+#     # We can add other graph-specific state elements here if needed
+#     error_message: Optional[str] = None
+
+# --- Agent Node Functions --- #
+
+def search_agent_node(state: GraphState) -> GraphState:
+    """Node that executes the search agent, choosing the method based on search_type."""
+    logger.info("--- Calling Search Agent Node --- ")
+    try:
+        agent = SearchAgent()
+        agent_state: AgentState = state['agent_state']
+        campaign_config: CampaignConfiguration = agent_state.campaign_config
+        
+        if not campaign_config:
+             # Handle error: No campaign config found
+             error_msg = "CampaignConfiguration not found in agent state."
+             logger.error(error_msg)
+             agent_state.current_step = "error"
+             agent_state.execution_status = "search_failed_no_config"
+             state['error_message'] = error_msg
+             state['agent_state'] = agent_state
+             return state
+
+        search_type = campaign_config.search_type
+
+        if search_type == "related":
+            seed_rss = campaign_config.seed_rss_url
+            if not seed_rss:
+                error_msg = "Search type is 'related' but no seed_rss_url provided in CampaignConfiguration."
+                logger.error(error_msg)
+                agent_state.current_step = "error"
+                agent_state.execution_status = "search_failed_no_seed_rss"
+                state['error_message'] = error_msg
+                state['agent_state'] = agent_state
+                return state
+            
+            logger.info(f"--- Search Node: Routing to RELATED search for seed: {seed_rss} ---")
+            updated_state = agent.run_related_search(state) # Call the new method
+        
+        elif search_type == "topic":
+             if not campaign_config.target_audience:
+                  # Handle error: topic search requires description
+                  error_msg = "Search type is 'topic' but no target_audience provided in CampaignConfiguration."
+                  logger.error(error_msg)
+                  agent_state.current_step = "error"
+                  agent_state.execution_status = "search_failed_no_description"
+                  state['error_message'] = error_msg
+                  state['agent_state'] = agent_state
+                  return state
+             
+             logger.info("--- Search Node: Routing to TOPIC search based on description ---")
+             updated_state = agent.run_search(state) # Call the existing method
+        
+        else:
+             # Handle error: Invalid search_type
+             error_msg = f"Invalid search_type '{search_type}' found in CampaignConfiguration."
+             logger.error(error_msg)
+             agent_state.current_step = "error"
+             agent_state.execution_status = "search_failed_invalid_type"
+             state['error_message'] = error_msg
+             state['agent_state'] = agent_state
+             return state
+             
+        return updated_state
+        
+    except Exception as e:
+        logger.exception("Critical error in search_agent_node execution.")
+        # Update state to reflect critical node failure
+        # Ensure agent_state exists before trying to modify it
+        if 'agent_state' in state:
+             state['agent_state'].current_step = "error"
+             state['agent_state'].execution_status = "node_failed"
+        state['error_message'] = f"Search node failed critically: {e}"
+        # Ensure agent_state is returned even if it couldn't be modified fully
+        if 'agent_state' not in state:
+             state['agent_state'] = AgentState(current_step="error", execution_status="node_failed") # Create minimal error state
+        return state
+
+def vetting_agent_node(state: GraphState) -> GraphState:
+    """Node that executes the vetting agent."""
+    logger.info("--- Calling Vetting Agent Node --- ")
+    start_time = time.time() # Record start time
+    agent_state = state['agent_state']
+    campaign_id = agent_state.campaign_config.campaign_id if agent_state.campaign_config else None
+    metrics_service = None # Initialize
+    final_status = "node_failed" # Default status
+    processed_count = 0
+    error_count = 0
+    
+    try:
+        # Initialize metrics service inside the node
+        metrics_service = MetricsService()
+        if metrics_service:
+             metrics_service.record_event(
+                event_name="agent_step_start", 
+                agent_step="vetting",
+                campaign_id=campaign_id
+            )
+        else:
+             logger.error("Failed to initialize MetricsService in vetting_agent_node.")
+             # Allow execution to continue but metrics won't be recorded
+             
+        # Ensure leads are present from the previous step
+        if not state['agent_state'].leads:
+            logger.warning("No leads found in state for vetting. Skipping vetting step.")
+            state['agent_state'].current_step = "enrichment"
+            state['agent_state'].execution_status = "vetting_skipped_no_leads"
+            final_status = state['agent_state'].execution_status
+            return state
+
+        agent = VettingAgent() # VettingAgent itself now initializes MetricsService too
+        updated_state = agent.run_vetting(state) # run_vetting records individual podcast metrics
+        
+        # Update final status based on agent execution
+        final_status = updated_state['agent_state'].execution_status 
+        # Get counts from metadata recorded by the agent (if we want overall counts here)
+        # This might require adjusting run_vetting to return counts or storing them in state
+        # For now, we rely on metrics recorded within run_vetting/vet_podcasts_batch
+        if updated_state['agent_state'].vetting_results:
+            processed_count = len(updated_state['agent_state'].vetting_results)
+            error_count = sum(1 for r in updated_state['agent_state'].vetting_results if r is None or r.quality_tier == "Error")
+            
+        return updated_state
+        
+    except Exception as e:
+        logger.exception("Critical error in vetting_agent_node execution.")
+        state['agent_state'].current_step = "error"
+        state['agent_state'].execution_status = "node_failed"
+        state['error_message'] = f"Vetting node failed critically: {e}"
+        final_status = state['agent_state'].execution_status
+        # Record node error metric
+        if metrics_service:
+            metrics_service.record_event(
+                event_name="error", 
+                agent_step="vetting",
+                campaign_id=campaign_id,
+                metadata={"error_type": "NodeExecution", "error_message": str(e)}
+            )
+        return state
+    finally:
+         # Record end event
+        if metrics_service:
+            duration_ms = (time.time() - start_time) * 1000
+            metrics_service.record_event(
+                event_name="agent_step_end", 
+                agent_step="vetting",
+                campaign_id=campaign_id,
+                duration_ms=duration_ms,
+                metadata={
+                    "final_status": final_status,
+                    "total_leads_processed_in_node": processed_count,
+                    "vetting_errors_in_node": error_count
+                }
+            )
+
+def enrichment_agent_node(state: GraphState) -> GraphState:
+    """Node that executes the enrichment agent."""
+    logger.info("--- Calling Enrichment Agent Node --- ")
+    try:
+        if not state['agent_state'].leads:
+            logger.warning("No leads found in state for enrichment. Skipping enrichment step.")
+            # Decide next step: Go to END if enrichment is skipped
+            # This depends on the desired workflow. Let's assume END for now.
+            state['agent_state'].current_step = "completed" # Mark as completed or skipped
+            state['agent_state'].execution_status = "enrichment_skipped_no_leads"
+            # Return the updated state directly
+            return state # Important: Return the state dict here
+
+        agent = EnrichmentAgent()
+        # Run the async function synchronously and get the result dict
+        updated_state = asyncio.run(agent.run_enrichment(state))
+        return updated_state
+    except Exception as e:
+        logger.exception("Critical error in enrichment_agent_node execution.")
+        # Ensure agent_state exists before trying to modify it
+        if 'agent_state' in state:
+            state['agent_state'].current_step = "error"
+            state['agent_state'].execution_status = "node_failed"
+        state['error_message'] = f"Enrichment node failed critically: {e}"
+        # Ensure agent_state is returned even if it couldn't be modified fully
+        if 'agent_state' not in state:
+             state['agent_state'] = AgentState(current_step="error", execution_status="node_failed") # Create minimal error state
+        return state
+
+def human_review_node(state: GraphState) -> GraphState:
+    logger.info("--- Executing Human Review Node (Placeholder) --- ")
+    current_state = state['agent_state']
+    # Log enriched data before moving on (example)
+    logger.info(f"Enriched profiles count: {len(current_state.enriched_profiles)}")
+    if current_state.enriched_profiles:
+        logger.info(f"Example enriched profile[0] sources: {current_state.enriched_profiles[0].data_sources}")
+    
+    current_state.current_step = "crm_export"
+    state['agent_state'] = current_state
+    logger.info("Human Review Node completed (Placeholder: Logged enriched data). ")
+    return state
+
+# --- Define CRM Export Node Placeholder --- #
+def crm_export_node(state: GraphState) -> GraphState:
+    """Placeholder node for CRM export. Not currently functional."""
+    logger.info("--- Skipping CRM Export Node (Placeholder) --- ")
+    # In a real scenario, this would interact with the CRM
+    agent_state = state['agent_state']
+    agent_state.current_step = "completed"
+    agent_state.execution_status = "crm_export_skipped_placeholder"
+    state['agent_state'] = agent_state
+    return state
+
+# --- Define Conditional Edge Functions --- #
+def decide_after_search(state: GraphState) -> str:
+    """Decides the next step after the search agent node.
+
+    Returns:
+        str: The name of the next node ('enrichment' or '__end__').
+    """
+    agent_state: AgentState = state['agent_state']
+    status = agent_state.execution_status
+    error_message = state.get('error_message')
+
+    # --- Failure / No-result conditions --- #
+    if (
+        error_message
+        or "failed" in status
+        or status.endswith("_no_results")  # Handles both topic and related variants
+    ):
+        logger.warning(
+            f"Search step failed or yielded no results (Status: {status}). Ending workflow."
+        )
+        return "__end__"  # Go directly to END if search failed or found nothing
+
+    # --- Success conditions that should continue to enrichment --- #
+    if (
+        status.startswith("search_complete")
+        or status.startswith("related_search_complete")
+    ):
+        logger.info(
+            f"Search step successful (Status: {status}). Proceeding to enrichment."
+        )
+        return "enrichment"  # Proceed to enrichment if search was successful
+
+    # --- Fallback --- #
+    logger.error(
+        f"Unknown status after search node: {status}. Ending workflow as a precaution."
+    )
+    return "__end__"  # Fallback to end on unexpected status
+
+# --- Build the Graph --- #
+def build_graph(checkpointer: Optional[BaseCheckpointSaver] = None):
+    """Builds the state machine graph."""
+    workflow = StateGraph(GraphState)
+
+    # Add nodes
+    workflow.add_node("search", search_agent_node)
+    workflow.add_node("enrichment", enrichment_agent_node)
+    # workflow.add_node("vetting", vetting_agent_node) # Vetting node (kept for reference)
+    workflow.add_node("crm_export", crm_export_node) # CRM node added
+    # workflow.add_node("human_review", human_review_node) # Human review node (kept for reference)
+
+    # Define edges
+    workflow.set_entry_point("search")
+
+    # Conditional Edge from Search (Simplified)
+    workflow.add_conditional_edges(
+        "search",
+        decide_after_search, # Use the new decision function
+        {
+            "enrichment": "enrichment", # Go to enrichment if search succeeds
+            "__end__": END          # Go to END if search fails or finds nothing
+        }
+    )
+
+    # Normal Edge from Enrichment
+    # workflow.add_edge("enrichment", "vetting") # Original edge to Vetting
+    workflow.add_edge("enrichment", END) # TEMP: Go straight to END after enrichment
+
+    # Conditional Edge from Vetting (Kept commented for reference)
+    # workflow.add_conditional_edges(
+    #     "vetting",
+    #     decide_after_vetting, # Function to decide next step
+    #     {
+    #         "crm_export": "crm_export", # If approved/good quality
+    #         "human_review": "human_review", # If needs review
+    #         "__end__": END # If rejected or error
+    #     }
+    # )
+
+    # Normal Edge from CRM Export to End (Still needed as crm_export node exists)
+    workflow.add_edge("crm_export", END)
+
+    # Normal Edge from Human Review to End (Kept commented for reference)
+    # workflow.add_edge("human_review", END)
+
+    # Compile the graph
+    app = workflow.compile(
+        checkpointer=checkpointer,
+        # interrupt_before=["human_review"], # Example: Interrupt before human review
+        )
+    return app
+
+# --- Graph Execution --- #
+
+def run_workflow(initial_state: AgentState, checkpointer: Optional[BaseCheckpointSaver]):
+    """Runs the workflow. Persistence is optional based on checkpointer."""
+    app = build_graph(checkpointer=checkpointer)
+
+    # Use a unique identifier for the thread, e.g., campaign_id
+    thread_id = initial_state.campaign_config.campaign_id
+    config = {"configurable": {"thread_id": thread_id}}
+
+    graph_input = GraphState(agent_state=initial_state)
+    logger.info(f"Running workflow for thread_id: {thread_id}")
+
+    # Check if there's existing state to resume from (only if checkpointer exists)
+    if checkpointer:
+        existing_state_tuple = checkpointer.get_tuple(config)
+        if existing_state_tuple:
+            logger.info(f"Resuming workflow from existing checkpoint for thread_id: {thread_id}")
+            # The graph will automatically pick up from the last saved state
+        else:
+            logger.info(f"Starting new workflow run for thread_id: {thread_id} (with persistence)")
+    else:
+        logger.info(f"Starting new workflow run for thread_id: {thread_id} (no persistence)")
+
+    # Use stream to see intermediate steps and allow for interruption/resumption
+    last_state = None # Initialize last_state
+    for output in app.stream(graph_input, config=config, stream_mode="values"):
+        # output is the state after each step has executed
+        last_state = output # Keep track of the most recent state
+        step_name = list(output.keys())[-1] # Get the name of the node that just ran
+        logger.info(f"<- Step '{step_name}' completed. Current state: {last_state['agent_state'].current_step}, Status: {last_state['agent_state'].execution_status} ->")
+        # We could add logic here to inspect the state and potentially pause/interrupt
+
+    # After the stream finishes, get the final state directly if needed
+    # Note: streaming already updates the checkpointer if it exists
+    final_agent_state = None
+    if checkpointer:
+        final_state_tuple = checkpointer.get_tuple(config)
+        if final_state_tuple:
+            final_graph_state = final_state_tuple.checkpoint
+            logger.info(f"Workflow finished for thread_id: {thread_id}. Final status: {final_graph_state['agent_state'].execution_status}")
+            final_agent_state = final_graph_state['agent_state']
+        else:
+            logger.error(f"Could not retrieve final state via checkpointer for thread_id: {thread_id}")
+    
+    # Fallback to the last observed state from the stream if checkpointer failed or doesn't exist
+    if final_agent_state is None and last_state:
+         logger.info(f"Workflow finished for thread_id: {thread_id}. Final status (from stream): {last_state['agent_state'].execution_status}")
+         final_agent_state = last_state['agent_state']
+    elif final_agent_state is None:
+         logger.error(f"Workflow finished for thread_id: {thread_id}, but could not determine final state.")
+
+    return final_agent_state
+
+if __name__ == '__main__':
+    # Example standalone execution for testing persistence
+    # Set up basic logging for the example
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logger.info("Testing StateGraph build and execution...")
+
+    checkpointer = None
+    # --- Uncomment below to test with persistence --- 
+    # from ..persistence.mongodb import connect_to_mongo, close_mongo_connection, initialize_collections
+    # try:
+    #     # Setup DB connection and checkpointer
+    #     connect_to_mongo()
+    #     initialize_collections() # Ensure MongoDB collections exist
+    #     checkpointer = get_checkpoint_saver()
+    #     logger.info("Persistence checkpointer obtained.")
+    # except Exception as e:
+    #     logger.error(f"Failed to set up persistence: {e}. Running without checkpointer.")
+    #     checkpointer = None
+    # --- End Persistence Setup Block ---
+    
+    # Create a dummy initial state with a descriptive target audience
+    test_campaign_id = f"test_campaign_{uuid.uuid4()}"
+    test_description = "Podcasts focused on early-stage SaaS startups, particularly those discussing product-market fit, bootstrapping, and interviews with founders who have recently raised seed funding in the fintech or healthtech sectors."
+    
+    initial_campaign = CampaignConfiguration(
+        campaign_id=test_campaign_id,
+        target_audience=test_description, # Use descriptive audience
+        key_messages=["Test key message"],
+        tone_preferences="Neutral"
+    )
+    initial_agent_state = AgentState(
+        current_step="search", # Start at the beginning
+        campaign_config=initial_campaign,
+        execution_status="pending"
+    )
+
+    print(f"\n--- Running workflow for campaign: {initial_campaign.campaign_id} ---")
+    # Pass checkpointer (which might be None) to run_workflow
+    final_state = run_workflow(initial_agent_state, checkpointer)
+    if final_state:
+         print(f"--- Workflow completed. Final step: {final_state.current_step}, Status: {final_state.execution_status} ---")
+         # Check for the CSV path if search completed successfully
+         if hasattr(final_state, 'search_results_csv_path') and final_state.search_results_csv_path:
+              print(f"Search results saved to: {final_state.search_results_csv_path}")
+         else:
+              print("Search results CSV path not found in final state.")
+    else:
+         print("--- Workflow execution finished with errors or no final state retrieved. ---")
+
+    # --- Uncomment below if testing with persistence ---
+    # finally:
+    #     # Close the MongoDB connection if it was used
+    #     if 'close_mongo_connection' in locals():
+    #          close_mongo_connection()
+    #          logger.info("MongoDB connection closed.")
+    # --- End Persistence Teardown --- 
+    print("\nTest finished.") 
