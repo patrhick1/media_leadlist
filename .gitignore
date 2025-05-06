@@ -31,6 +31,7 @@ node_modules/
 *.njsproj
 *.sln
 *.sw?
+.cursor/
 
 # OS specific
 .DS_Store
