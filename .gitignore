@@ -51,3 +51,7 @@ tasks/
 # Ignore task-master.ai files and directories
 task-master.ai/
 *task-master.ai*
+
+# Replit specific files
+.replit
+replit.nix
