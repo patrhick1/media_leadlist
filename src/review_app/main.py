@@ -2,18 +2,17 @@ import logging
 import hmac
 import hashlib
 import os
-from fastapi import FastAPI, HTTPException, Query, Request, Header, BackgroundTasks, Depends, status
+from fastapi import FastAPI, HTTPException, Query, Request, Header, BackgroundTasks, Depends, status, Response, Cookie
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse # Ensure FileResponse is imported
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal, Dict, Any
-import math # For pagination calculation if needed later
-# Import datetime if needed for sorting/filtering by date
-from datetime import datetime 
-# Import Config and Env Loading
-from ..config import Settings
+import math
+from datetime import datetime, timedelta
+from ..config import Settings, get_settings
 from dotenv import load_dotenv, find_dotenv
+from jose import JWTError, jwt
 
 # Import our existing models (adjust path if needed)
 # Assuming PodcastLead includes the necessary display info
@@ -47,8 +46,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- Load .env and Instantiate Settings --- #
-load_dotenv(find_dotenv())
-app_settings = Settings() # Create settings instance ONCE
+# load_dotenv(find_dotenv()) # This might be redundant if get_settings handles it or if run from a context where .env is already loaded
+# app_settings = get_settings() # Using dependency injection for settings now
 
 # --- FastAPI App Initialization --- #
 app = FastAPI(
@@ -65,12 +64,15 @@ origins = [
     "http://localhost:3000", # Common React dev port
     "http://localhost:8080", # Common Vue dev port
     "http://localhost:5173", # Common Vite dev port
+    "https://medialeadlist.replit.app"
+    # Add your Replit frontend URL if it's different and fixed
+    # e.g., "https://your-replit-project-name.replit.dev"
 ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_credentials=True,
+    allow_credentials=True, # IMPORTANT: Must be True for cookies to be sent/received
     allow_methods=["*"], # Allow all methods
     allow_headers=["*"], # Allow all headers
 )
@@ -82,7 +84,7 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory="data"), name="static")
 
 # --- Serve Static Frontend Files (for Replit deployment) ---
-FRONTEND_BUILD_DIR = "review_ui/build/client" # As confirmed from build output
+FRONTEND_BUILD_DIR = "review_ui/build/client" # Path confirmed from react-router build logs
 STATIC_ASSETS_DIR = os.path.join(FRONTEND_BUILD_DIR, "assets")
 
 # Serve static assets (CSS, JS, images) from the frontend build
@@ -90,7 +92,7 @@ if os.path.exists(STATIC_ASSETS_DIR):
     app.mount("/assets", StaticFiles(directory=STATIC_ASSETS_DIR), name="static_frontend_assets")
     logger.info(f"Mounted static frontend assets from: {STATIC_ASSETS_DIR}")
 else:
-    logger.warning(f"Frontend static assets directory not found: {STATIC_ASSETS_DIR}. Frontend assets will not be served via /assets.")
+    logger.warning(f"Frontend static assets directory not found at {STATIC_ASSETS_DIR}. Frontend assets will not be served via /assets.")
 # --- End Serve Static Frontend Files ---
 
 # --- API Models --- #
@@ -138,8 +140,9 @@ class BulkReviewResponse(BaseModel):
 # --- NEW: Pydantic models for Standalone Search Actions --- #
 class StandaloneTopicSearchRequest(BaseModel):
     target_audience: str = Field(..., description="The target audience profile for keyword generation.")
-    key_messages: Optional[List[str]] = Field(None, description="Optional key messages to refine keyword generation.")
+    key_messages: Optional[List[str]] = Field(None, description="Optional key messages to refine keyword generation. For the UI, this will be the 'topic to speak on'.")
     num_keywords_to_generate: int = Field(10, ge=1, le=30, description="Number of keywords to generate for the search.")
+    max_results_per_keyword: int = Field(50, ge=1, le=200, description="Maximum results to attempt to fetch per API per keyword.")
     # campaign_id_prefix: Optional[str] = "standalone_topic" # Can be handled by agent internally
 
 class StandaloneRelatedSearchRequest(BaseModel):
@@ -215,7 +218,48 @@ class LoginRequest(BaseModel):
 
 # --- NEW: Dependency function to provide settings --- #
 def get_app_settings() -> Settings:
-    return app_settings
+    return get_settings() # Correctly return the result of get_settings()
+
+# --- JWT Utility Functions ---
+def create_access_token(data: dict, settings: Settings, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+    return encoded_jwt
+
+async def get_current_user_from_token(
+    settings: Settings = Depends(get_settings), 
+    session_token: Optional[str] = Cookie(None) # Read the cookie
+):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"}, # Though we use cookies, this is a common header
+    )
+    if session_token is None:
+        logger.warning("No session token cookie found.")
+        raise credentials_exception
+    try:
+        payload = jwt.decode(session_token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+        # For now, we don't have a specific "username" or user ID in the token,
+        # so we'll just confirm the token is valid.
+        # You could add a "sub" (subject) to your token data if needed.
+        # username: str = payload.get("sub")
+        # if username is None:
+        #     raise credentials_exception
+        # For this basic setup, if decode is successful, we consider the user authenticated.
+        logger.info(f"Token decoded successfully for payload: {payload}")
+        return {"user_payload": payload} # Return payload or a placeholder indicating auth
+    except JWTError as e:
+        logger.error(f"JWTError decoding token: {e}")
+        raise credentials_exception
+    except Exception as e:
+        logger.error(f"Unexpected error decoding token: {e}")
+        raise credentials_exception
 
 # --- API Endpoints --- #
 
@@ -238,10 +282,11 @@ def get_leads_for_review(
     max_score: Optional[int] = Query(None, ge=0, le=100, description="Maximum composite score"),
     search_term: Optional[str] = Query(None, description="Search term for podcast name or description"),
     sort_by: Optional[Literal['date_added', 'score', 'name']] = Query(None, description="Field to sort by ('date_added', 'score', 'name') (uses user default if available)"),
-    sort_order: Optional[Literal['asc', 'desc']] = Query(None, description="Sort order ('asc', 'desc') (uses user default if available)")
+    sort_order: Optional[Literal['asc', 'desc']] = Query(None, description="Sort order ('asc', 'desc') (uses user default if available)"),
+    current_user: dict = Depends(get_current_user_from_token) # Protected
 ):
     """Retrieves a paginated list of podcast leads, optionally using user preferences for defaults."""
-    
+    logger.info(f"User {current_user} accessing /leads endpoint.")
     # --- Load User Preferences (if user_id provided) --- #
     # Initialize preferences with a safe user_id (defaults) to avoid validation errors
     initial_user_id = user_id or "_anonymous_"
@@ -328,10 +373,11 @@ def get_leads_for_review(
 @app.post("/leads/{podcast_id}/review", status_code=204, tags=["Leads"])
 def submit_lead_review(
     podcast_id: str,
-    decision: LeadReviewDecision
+    decision: LeadReviewDecision,
+    current_user: dict = Depends(get_current_user_from_token) # Protected
 ):
     """Submits a human review decision (approve/reject) for a specific lead."""
-    logger.info(f"Review decision received for podcast_id='{podcast_id}': Approved={decision.approved}, Feedback='{decision.feedback or ''}'")
+    logger.info(f"User {current_user} - Review decision received for podcast_id='{podcast_id}': Approved={decision.approved}, Feedback='{decision.feedback or ''}'")
     # TODO: Implement logic to find the lead by podcast_id
     # TODO: Update the lead's status in the database (e.g., 'approved', 'rejected')
     # TODO: Store the feedback if provided
@@ -349,9 +395,12 @@ def submit_lead_review(
 
 # --- NEW: Bulk Review Endpoint --- #
 @app.post("/leads/bulk-review", response_model=BulkReviewResponse, tags=["Leads"])
-async def submit_bulk_lead_review(decision: BulkReviewDecision):
+async def submit_bulk_lead_review(
+    decision: BulkReviewDecision,
+    current_user: dict = Depends(get_current_user_from_token) # Protected
+):
     """Submits a review decision (approve/reject) for multiple leads at once."""
-    logger.info(f"Bulk review decision received for {len(decision.podcast_ids)} leads: Approved={decision.approved}")
+    logger.info(f"User {current_user} - Bulk review decision received for {len(decision.podcast_ids)} leads: Approved={decision.approved}")
     
     processed = 0
     success = 0
@@ -407,9 +456,15 @@ async def submit_bulk_lead_review(decision: BulkReviewDecision):
 # --- NEW: User Preference Endpoints --- #
 
 @app.get("/users/{user_id}/preferences", response_model=UserPreferences, tags=["Users", "Preferences"])
-async def get_user_preferences(user_id: str):
+async def get_user_preferences(
+    user_id: str,
+    current_user: dict = Depends(get_current_user_from_token) # Protected
+):
     """Retrieves saved preferences for a given user."""
-    logger.info(f"Request received for preferences of user: {user_id}")
+    # Add check: ensure current_user can access preferences for user_id
+    # For now, assuming any authenticated user can fetch any user's prefs for simplicity,
+    # but in a real app, you'd restrict this.
+    logger.info(f"User {current_user} - Request received for preferences of user: {user_id}")
     # TODO: Replace with DB lookup
     if user_id in DUMMY_USER_PREFS:
         return DUMMY_USER_PREFS[user_id]
@@ -423,9 +478,14 @@ async def get_user_preferences(user_id: str):
         # raise HTTPException(status_code=404, detail=f"Preferences not found for user '{user_id}'")
 
 @app.put("/users/{user_id}/preferences", response_model=UserPreferences, tags=["Users", "Preferences"])
-async def update_user_preferences(user_id: str, preferences: UserPreferences):
+async def update_user_preferences(
+    user_id: str, 
+    preferences: UserPreferences,
+    current_user: dict = Depends(get_current_user_from_token) # Protected
+):
     """Saves/updates preferences for a given user."""
-    logger.info(f"Request received to update preferences for user: {user_id}")
+    # Add check: ensure current_user can update preferences for user_id
+    logger.info(f"User {current_user} - Request received to update preferences for user: {user_id}")
     # Basic validation
     if user_id != preferences.user_id:
         raise HTTPException(status_code=400, detail="User ID in path does not match user ID in preferences payload.")
@@ -440,9 +500,10 @@ async def update_user_preferences(user_id: str, preferences: UserPreferences):
 async def handle_attio_webhook(
     payload: AttioWebhookPayload, 
     request: Request, # Inject Request object to access body and headers
-    settings: Settings = Depends(get_app_settings), # Inject settings
+    settings: Settings = Depends(get_settings), # Inject settings
     # Placeholder: Replace 'X-Attio-Signature-256' with the actual header name
     x_attio_signature: Optional[str] = Header(None, alias="X-Attio-Signature-256") 
+    # This endpoint is typically not protected by user session tokens, but by a webhook secret
 ):
     """Receives and processes webhook events from Attio."""
     logger.info(f"Received Attio webhook. Event Type: {payload.event_type}")
@@ -522,9 +583,12 @@ async def handle_attio_webhook(
 # --- NEW: Analytics Endpoints --- #
 
 @app.get("/analytics/step-durations", tags=["Analytics"])
-async def get_analytics_step_durations(campaign_id: Optional[str] = Query(None, description="Optional Campaign ID to filter results")):
+async def get_analytics_step_durations(
+    campaign_id: Optional[str] = Query(None, description="Optional Campaign ID to filter results"),
+    current_user: dict = Depends(get_current_user_from_token) # Protected
+):
     """Retrieves average and median durations for each workflow step."""
-    logger.info(f"Request received for analytics: step durations. Campaign ID: {campaign_id}")
+    logger.info(f"User {current_user} - Request received for analytics: step durations. Campaign ID: {campaign_id}")
     try:
         analytics_service = AnalyticsService()
         durations = analytics_service.get_step_durations(campaign_id=campaign_id)
@@ -539,9 +603,12 @@ async def get_analytics_step_durations(campaign_id: Optional[str] = Query(None, 
         raise HTTPException(status_code=500, detail="Internal server error fetching analytics.")
 
 @app.get("/analytics/vetting-distribution", tags=["Analytics"])
-async def get_analytics_vetting_distribution(campaign_id: Optional[str] = Query(None, description="Optional Campaign ID to filter results")):
+async def get_analytics_vetting_distribution(
+    campaign_id: Optional[str] = Query(None, description="Optional Campaign ID to filter results"),
+    current_user: dict = Depends(get_current_user_from_token) # Protected
+):
     """Retrieves the distribution of vetting quality tiers."""
-    logger.info(f"Request received for analytics: vetting distribution. Campaign ID: {campaign_id}")
+    logger.info(f"User {current_user} - Request received for analytics: vetting distribution. Campaign ID: {campaign_id}")
     try:
         analytics_service = AnalyticsService()
         distribution = analytics_service.get_vetting_tier_distribution(campaign_id=campaign_id)
@@ -551,9 +618,12 @@ async def get_analytics_vetting_distribution(campaign_id: Optional[str] = Query(
         raise HTTPException(status_code=500, detail="Internal server error fetching analytics.")
 
 @app.get("/analytics/search-performance", tags=["Analytics"])
-async def get_analytics_search_performance(campaign_id: Optional[str] = Query(None, description="Optional Campaign ID to filter results")):
+async def get_analytics_search_performance(
+    campaign_id: Optional[str] = Query(None, description="Optional Campaign ID to filter results"),
+    current_user: dict = Depends(get_current_user_from_token) # Protected
+):
     """Retrieves search performance metrics grouped by source."""
-    logger.info(f"Request received for analytics: search performance. Campaign ID: {campaign_id}")
+    logger.info(f"User {current_user} - Request received for analytics: search performance. Campaign ID: {campaign_id}")
     try:
         analytics_service = AnalyticsService()
         performance = analytics_service.get_search_source_performance(campaign_id=campaign_id)
@@ -563,9 +633,12 @@ async def get_analytics_search_performance(campaign_id: Optional[str] = Query(No
         raise HTTPException(status_code=500, detail="Internal server error fetching analytics.")
 
 @app.get("/analytics/crm-sync-summary", tags=["Analytics"])
-async def get_analytics_crm_sync_summary(campaign_id: Optional[str] = Query(None, description="Optional Campaign ID to filter results")):
+async def get_analytics_crm_sync_summary(
+    campaign_id: Optional[str] = Query(None, description="Optional Campaign ID to filter results"),
+    current_user: dict = Depends(get_current_user_from_token) # Protected
+):
     """Retrieves a summary of CRM synchronization attempts, successes, and errors."""
-    logger.info(f"Request received for analytics: CRM sync summary. Campaign ID: {campaign_id}")
+    logger.info(f"User {current_user} - Request received for analytics: CRM sync summary. Campaign ID: {campaign_id}")
     try:
         analytics_service = AnalyticsService()
         summary = analytics_service.get_crm_sync_summary(campaign_id=campaign_id)
@@ -575,9 +648,12 @@ async def get_analytics_crm_sync_summary(campaign_id: Optional[str] = Query(None
         raise HTTPException(status_code=500, detail="Internal server error fetching analytics.")
 
 @app.get("/analytics/suggestions", tags=["Analytics"])
-async def get_analytics_suggestions(campaign_id: Optional[str] = Query(None, description="Optional Campaign ID to filter results")):
+async def get_analytics_suggestions(
+    campaign_id: Optional[str] = Query(None, description="Optional Campaign ID to filter results"),
+    current_user: dict = Depends(get_current_user_from_token) # Protected
+):
     """Generates performance suggestions based on collected metrics."""
-    logger.info(f"Request received for analytics: suggestions. Campaign ID: {campaign_id}")
+    logger.info(f"User {current_user} - Request received for analytics: suggestions. Campaign ID: {campaign_id}")
     try:
         analytics_service = AnalyticsService()
         suggestions = analytics_service.generate_performance_suggestions(campaign_id=campaign_id)
@@ -587,13 +663,16 @@ async def get_analytics_suggestions(campaign_id: Optional[str] = Query(None, des
         raise HTTPException(status_code=500, detail="Internal server error generating suggestions.")
 
 @app.get("/analytics/compare-campaigns", tags=["Analytics"])
-async def compare_campaign_analytics(campaign_ids: List[str] = Query(..., description="List of Campaign IDs to compare")):
+async def compare_campaign_analytics(
+    campaign_ids: List[str] = Query(..., description="List of Campaign IDs to compare"),
+    current_user: dict = Depends(get_current_user_from_token) # Protected
+):
     """Retrieves and compares analytics across multiple specified campaigns."""
     # Basic validation
     if not campaign_ids or len(campaign_ids) < 2:
          raise HTTPException(status_code=400, detail="Please provide at least two campaign IDs to compare.")
          
-    logger.info(f"Request received for analytics: compare campaigns. IDs: {campaign_ids}")
+    logger.info(f"User {current_user} - Request received for analytics: compare campaigns. IDs: {campaign_ids}")
     try:
         analytics_service = AnalyticsService()
         comparison_data = analytics_service.compare_campaigns(campaign_ids=campaign_ids)
@@ -620,6 +699,7 @@ class WorkflowResponse(BaseModel):
 @app.post("/campaigns/run", response_model=WorkflowResponse, tags=["Workflow"])
 async def run_campaign_workflow_sync(
     campaign_config: CampaignConfiguration,
+    current_user: dict = Depends(get_current_user_from_token) # Protected
     # background_tasks: BackgroundTasks # Removed BackgroundTasks
 ) -> WorkflowResponse:
     """
@@ -627,7 +707,7 @@ async def run_campaign_workflow_sync(
     synchronously for the given campaign configuration and returns the final state.
     WARNING: This can take a significant amount of time.
     """
-    logger.info(f"Received synchronous request to run workflow for campaign: {campaign_config.campaign_id} ({campaign_config.target_audience})")
+    logger.info(f"User {current_user} - Received synchronous request to run workflow for campaign: {campaign_config.campaign_id} ({campaign_config.target_audience})")
     final_agent_state = None
     try:
         # 1. Create Initial State
@@ -678,14 +758,18 @@ search_agent_instance = SearchAgent()
 enrichment_agent_instance = EnrichmentAgent() # Instantiate EnrichmentAgent
 
 @app.post("/actions/search/topic", response_model=StandaloneSearchResponse, tags=["Actions", "Search"])
-async def trigger_standalone_topic_search(request_data: StandaloneTopicSearchRequest):
+async def trigger_standalone_topic_search(
+    request_data: StandaloneTopicSearchRequest,
+    current_user: dict = Depends(get_current_user_from_token) # Protected
+):
     """Triggers a standalone topic-based podcast search."""
-    logger.info(f"Received standalone topic search request: {request_data.target_audience}")
+    logger.info(f"User {current_user} - Received standalone topic search request: {request_data.target_audience}")
     try:
         leads, csv_path = search_agent_instance.perform_standalone_topic_search(
             target_audience=request_data.target_audience,
             key_messages=request_data.key_messages,
-            num_keywords_to_generate=request_data.num_keywords_to_generate
+            num_keywords_to_generate=request_data.num_keywords_to_generate,
+            max_results_per_keyword=request_data.max_results_per_keyword
         )
         return StandaloneSearchResponse(
             message=f"Standalone topic search completed. Found {len(leads)} leads.",
@@ -705,9 +789,12 @@ async def trigger_standalone_topic_search(request_data: StandaloneTopicSearchReq
         )
 
 @app.post("/actions/search/related", response_model=StandaloneSearchResponse, tags=["Actions", "Search"])
-async def trigger_standalone_related_search(request_data: StandaloneRelatedSearchRequest):
+async def trigger_standalone_related_search(
+    request_data: StandaloneRelatedSearchRequest,
+    current_user: dict = Depends(get_current_user_from_token) # Protected
+):
     """Triggers a standalone related podcast search based on a seed RSS URL."""
-    logger.info(f"Received standalone related search request for RSS: {request_data.seed_rss_url}")
+    logger.info(f"User {current_user} - Received standalone related search request for RSS: {request_data.seed_rss_url}")
     try:
         leads, csv_path = search_agent_instance.perform_standalone_related_search(
             seed_rss_url=request_data.seed_rss_url,
@@ -733,9 +820,12 @@ async def trigger_standalone_related_search(request_data: StandaloneRelatedSearc
 
 # --- NEW: Standalone Enrichment Endpoint ---
 @app.post("/actions/enrich", response_model=StandaloneEnrichmentResponse, tags=["Actions", "Enrichment"])
-async def trigger_standalone_enrichment(request_data: StandaloneEnrichmentRequest):
+async def trigger_standalone_enrichment(
+    request_data: StandaloneEnrichmentRequest,
+    current_user: dict = Depends(get_current_user_from_token) # Protected
+):
     """Triggers standalone enrichment for a provided list of podcast leads."""
-    logger.info(f"Received standalone enrichment request for {len(request_data.leads)} leads. Source Campaign ID: {request_data.source_campaign_id}")
+    logger.info(f"User {current_user} - Received standalone enrichment request for {len(request_data.leads)} leads. Source Campaign ID: {request_data.source_campaign_id}")
     if not request_data.leads:
         return StandaloneEnrichmentResponse(
             message="No leads provided for enrichment.",
@@ -774,38 +864,9 @@ async def trigger_standalone_enrichment(request_data: StandaloneEnrichmentReques
 #     # ... original background implementation ...
 #     pass
 
-# --- SPA Catch-all (SHOULD BE PLACED AFTER ALL OTHER API ROUTES BUT BEFORE STARTUP/SHUTDOWN EVENTS) ---
-# This serves the main index.html for any GET request that isn't an API route, crucial for SPAs.
-FRONTEND_INDEX_HTML = os.path.join(FRONTEND_BUILD_DIR, "index.html")
-
-if os.path.exists(FRONTEND_INDEX_HTML):
-    @app.get("/{full_path:path}", include_in_schema=False)
-    async def serve_react_app(request: Request, full_path: str): # Added request: Request
-        # Check if the path looks like an API call based on typical prefixes
-        # or if it has a file extension common for static files not under /assets
-        # This is a basic check; more sophisticated logic might be needed
-        # if you have API routes without a common prefix like /api
-        path_parts = full_path.split('/')
-        if path_parts and path_parts[0] in ["webhooks", "actions", "campaigns", "users", "leads", "analytics", "static"]: # Add your API prefixes
-            # If it looks like an API path that somehow wasn't caught by other routes,
-            # re-raise a 404 instead of serving index.html.
-            # This shouldn't happen if routes are ordered correctly, but acts as a safeguard.
-            logger.debug(f"Path {full_path} looks like API call, but not matched by other routes. Returning 404.")
-            raise HTTPException(status_code=404, detail="Resource not found")
-
-        logger.debug(f"Serving SPA index.html for path: {full_path}")
-        # Check again in case it was deleted between app start and request
-        if not os.path.exists(FRONTEND_INDEX_HTML):
-             logger.error(f"SPA index.html not found at: {FRONTEND_INDEX_HTML} during request for {full_path}")
-             raise HTTPException(status_code=500, detail="Frontend not available")
-        return FileResponse(FRONTEND_INDEX_HTML)
-    logger.info(f"SPA catch-all route configured to serve index.html from: {FRONTEND_INDEX_HTML}")
-else:
-    logger.warning(f"Frontend index.html not found at: {FRONTEND_INDEX_HTML}. SPA will not be served by catch-all. Ensure the frontend is built and path is correct.")
-
 # --- NEW: Authentication Endpoint --- #
 @app.post("/auth/validate-login", status_code=status.HTTP_200_OK, tags=["Authentication"])
-async def validate_login(login_request: LoginRequest, settings: Settings = Depends(get_app_settings)):
+async def validate_login(login_request: LoginRequest, settings: Settings = Depends(get_settings)):
     # IMPORTANT: Ensure PGL_FRONTEND_PASSWORD is set in your Replit Secrets (or .env for local dev)
     # And that your Settings model in config.py loads it.
     # Example in Settings (src/config.py):
@@ -813,8 +874,8 @@ async def validate_login(login_request: LoginRequest, settings: Settings = Depen
     
     expected_password = settings.PGL_FRONTEND_PASSWORD 
     # Add a check to ensure the setting was loaded
-    if not expected_password:
-        logger.error("CRITICAL: PGL_FRONTEND_PASSWORD is not configured in server settings.")
+    if not expected_password or expected_password == "DEFAULT_PGL_PASSWORD_SHOULD_BE_OVERRIDDEN_BY_ENV": # Added check for default
+        logger.error("CRITICAL: PGL_FRONTEND_PASSWORD is not configured in server settings or is using the default insecure value.")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Server authentication configuration error."
@@ -822,9 +883,27 @@ async def validate_login(login_request: LoginRequest, settings: Settings = Depen
 
     if login_request.password == expected_password:
         logger.info("Frontend login validation successful.")
-        # Optionally, you could return a short-lived session token here in the future
-        # For now, just a success status is enough for the client to set its flag.
-        return {"message": "Login successful"} # Body can be empty for 200, or include a message
+        # Create a token
+        access_token_expires = timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
+        # For now, the token subject can be simple. In a multi-user system, this would be user_id.
+        access_token = create_access_token(
+            data={"sub": "user_authenticated"}, # You can put more user info here if needed
+            settings=settings, 
+            expires_delta=access_token_expires
+        )
+        
+        response = JSONResponse(content={"message": "Login successful", "access_token_type": "cookie"}) # Updated message
+        response.set_cookie(
+            key="session_token",
+            value=access_token,
+            httponly=True, # Client-side JS cannot access this cookie
+            secure=True,   # Cookie will only be sent over HTTPS in production
+            samesite="lax", # Mitigates CSRF
+            max_age=int(access_token_expires.total_seconds()) # In seconds
+            # domain= settings.COOKIE_DOMAIN (optional, for cross-subdomain cookies if needed)
+            # path= "/" (optional, defaults to /)
+        )
+        return response
     else:
         logger.warning("Frontend login validation failed: Incorrect password.")
         raise HTTPException(
@@ -832,6 +911,33 @@ async def validate_login(login_request: LoginRequest, settings: Settings = Depen
             detail="Invalid credentials"
         )
 # --- END NEW Authentication Endpoint --- #
+
+# --- SPA Catch-all (MUST BE PLACED AFTER ALL OTHER API ROUTES BUT BEFORE STARTUP/SHUTDOWN EVENTS) --- #
+# This serves the main index.html for any GET request that isn't an API route, crucial for SPAs.
+FRONTEND_INDEX_HTML = os.path.join(FRONTEND_BUILD_DIR, "index.html") # Uses the updated FRONTEND_BUILD_DIR
+
+if os.path.exists(FRONTEND_INDEX_HTML):
+    @app.get("/{full_path:path}", include_in_schema=False) # THIS IS THE CATCH-ALL
+    async def serve_react_app(request: Request, full_path: str): 
+        path_parts = full_path.split('/')
+        api_prefixes = ["webhooks", "actions", "campaigns", "users", "leads", "analytics", "static", "auth"]
+        if path_parts and path_parts[0] in api_prefixes:
+            logger.debug(f"Path {full_path} looks like API call, but not matched by other routes. Returning 404.")
+            raise HTTPException(status_code=404, detail="Resource not found")
+
+        potential_file_in_build_root = os.path.join(FRONTEND_BUILD_DIR, full_path)
+        if "." in full_path.split("/")[-1] and os.path.exists(potential_file_in_build_root):
+            logger.debug(f"Serving specific file from build root: {potential_file_in_build_root} for path: {full_path}")
+            return FileResponse(potential_file_in_build_root)
+
+        logger.debug(f"Serving SPA index.html ({FRONTEND_INDEX_HTML}) for path: {full_path}")
+        if not os.path.exists(FRONTEND_INDEX_HTML):
+             logger.error(f"SPA index.html not found at: {FRONTEND_INDEX_HTML} during request for {full_path}")
+             raise HTTPException(status_code=500, detail="Frontend not available")
+        return FileResponse(FRONTEND_INDEX_HTML)
+    logger.info(f"SPA catch-all route configured to serve index.html from: {FRONTEND_INDEX_HTML}")
+else:
+    logger.warning(f"Frontend index.html not found at: {FRONTEND_INDEX_HTML}. SPA will not be served by catch-all. Ensure the frontend is built and path is correct.")
 
 # --- Optional: Add startup/shutdown events --- #
 @app.on_event("startup")
@@ -843,7 +949,8 @@ async def startup_event():
     # await initialize_collections() # Ensure collections/indexes exist
     # Initialize Beanie (crucial for the checkpointer)
     # Pass the explicitly loaded settings object
-    await initialize_beanie_for_checkpointer(app_settings)
+    settings = get_settings() # <--- Get settings instance here
+    await initialize_beanie_for_checkpointer(settings) # <--- Use the local settings instance
     logger.info("Database connections and Beanie initialized.")
 
 @app.on_event("shutdown")

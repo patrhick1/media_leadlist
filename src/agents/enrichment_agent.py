@@ -338,34 +338,37 @@ class EnrichmentAgent:
             logger.debug(f"Performing targeted online search for '{target_name}' for {podcast_api_id}. Query: '{search_query}'")
             online_search_result_text = None
             try:
-                # online_search_result_text = await asyncio.to_thread(query_gemini_google_search, search_query)
-                # await asyncio.sleep(1) 
-                
-                tavily_results = await async_tavily_search(search_query, max_results=2) # Use Tavily
+                # tavily_results = await async_tavily_search(search_query, max_results=2) # Old call
+                tavily_response = await async_tavily_search(
+                    search_query,
+                    max_results=2,  # Keep max_results relatively low if primarily using the answer
+                    search_depth="advanced", # Ensure advanced depth for better quality answer
+                    include_answer=True    # Request the LLM-generated answer
+                )
                 await asyncio.sleep(0.2) # Small delay, can be adjusted
 
-                if tavily_results:
+                if tavily_response and tavily_response.get("answer"):
+                    online_search_result_text = tavily_response["answer"]
+                    logger.info(f"Tavily search for '{target_name}' for {podcast_api_id} yielded an answer: '{online_search_result_text[:150]}...'")
+                    # Append the answer. The query is included for context for the final parser.
+                    found_info_texts.append(f"{target_name} (from online search answer - query: \"{search_query}\"):\n{online_search_result_text}")
+                
+                elif tavily_response and tavily_response.get("results"):
+                    # Fallback: If no answer, but results (snippets) are available
+                    results_snippets = tavily_response["results"]
+                    logger.warning(f"Tavily search for '{target_name}' for {podcast_api_id} provided no answer, but found {len(results_snippets)} snippets. Using snippets.")
                     formatted_tavily_snippets = []
-                    for i, res in enumerate(tavily_results):
+                    for i, res in enumerate(results_snippets):
                         title_str = f"Title {i+1}: {res.get('title', 'N/A')}\n" if res.get('title') else ""
                         url_str = f"URL {i+1}: {res.get('url', 'N/A')}\n"
-                        content_str = f"Content {i+1}: {res.get('content', 'N/A')}"
-                        formatted_tavily_snippets.append(f"{title_str}{url_str}{content_str}")
+                        content_str = f"Content {i+1}: {res.get('content', 'N/A')}" # Content might be long
+                        # Limit snippet length for conciseness in the final prompt
+                        formatted_tavily_snippets.append(f"{title_str}{url_str}{content_str[:500]}...") 
                     
                     online_search_result_text = "\n\n---\n".join(formatted_tavily_snippets)
-                    logger.info(f"Tavily search for '{target_name}' for {podcast_api_id} yielded results: '{online_search_result_text[:150]}...'")
-                    # Append formatted results. The query is included for context for the parser.
-                    found_info_texts.append(f"{target_name} (from online search - query: \"{search_query}\"):\n{online_search_result_text}")
-                    
-                    # Removed the specific host name parsing from here:
-                    # if target_name == "Host Names":
-                    #    cleaned_host_text = online_search_result_text.split(" is ")[-1].split(" are ")[-1].strip('. ').strip()
-                    #    if cleaned_host_text and len(cleaned_host_text) < 70 : 
-                    #        host_name_for_prompts = cleaned_host_text
-                    # The final Gemini structured parser will extract host names from the combined_text_for_parsing,
-                    # which will include these Tavily snippets.
+                    found_info_texts.append(f"{target_name} (from online search snippets - query: \"{search_query}\"):\n{online_search_result_text}")
                 else:
-                    logger.warning(f"Tavily search for '{target_name}' for {podcast_api_id} returned no results.")
+                    logger.warning(f"Tavily search for '{target_name}' for {podcast_api_id} returned no answer and no results, or an error occurred (response was: {tavily_response})")
 
             except Exception as e:
                 logger.error(f"Error during targeted online search call (Tavily) for '{target_name}' for {podcast_api_id}: {e}")

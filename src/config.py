@@ -52,6 +52,11 @@ class Settings(BaseSettings):
         extra="ignore",  # Ignore unknown env vars rather than error
     )
 
+    # --- JWT Settings for Session Management ---
+    JWT_SECRET_KEY: str = Field(default="super-secret-key-please-change-in-env", env="JWT_SECRET_KEY") # IMPORTANT: Override in .env or Replit Secrets
+    JWT_ALGORITHM: str = Field(default="HS256", env="JWT_ALGORITHM")
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=30, env="JWT_ACCESS_TOKEN_EXPIRE_MINUTES")
+
 
 def get_settings() -> Settings:  # pragma: no cover
     """Return a cached *singleton* Settings instance.

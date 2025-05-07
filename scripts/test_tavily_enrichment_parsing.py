@@ -19,7 +19,7 @@ from src.models.social import GeminiPodcastEnrichment # For type hint
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 # You can set a more verbose level for specific modules if needed, e.g.:
-logging.getLogger('src.agents.enrichment_agent').setLevel(logging.INFO)
+# logging.getLogger('src.agents.enrichment_agent').setLevel(logging.INFO) # Will be set to DEBUG in main
 logging.getLogger('src.services.tavily_search').setLevel(logging.INFO)
 logging.getLogger('src.services.gemini_search').setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
@@ -90,7 +90,11 @@ sample_podcast_data = [
 
 async def main():
     logger.info("--- Starting Tavily Enrichment Parsing Test ---")
+    logger.info("--- This test verifies the EnrichmentAgent workflow using Tavily's 'include_answer=True' feature. ---")
     load_dotenv()
+
+    # Set specific logger for enrichment_agent to DEBUG for this test run to see more details
+    logging.getLogger('src.agents.enrichment_agent').setLevel(logging.DEBUG)
 
     # Check for necessary API keys
     google_api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")

@@ -300,7 +300,6 @@ class SearchAgent:
                 while True:
                     logger.debug(f"Fetching Podscan page {current_page} for '{keyword}'")
                     ps_page_data, ps_pagination = self.search_service.search_podscan_paginated(keyword, page=current_page)
-                    
                     if ps_page_data:
                         page_results = ps_page_data.get('podcasts', []) # Assuming list is under 'podcasts' key
                         all_podscan_raw_data.extend(page_results)
@@ -310,17 +309,16 @@ class SearchAgent:
                     else:
                         logger.warning(f"Podscan search failed for '{keyword}' at page {current_page}. Stopping PS search for this keyword.")
                         break # Stop Podscan search for this keyword if a page fails
-                        
                     if ps_pagination and ps_pagination.get("has_next"):
                         next_page = ps_pagination.get("next_page")
                         if next_page is None: # Safety check
-                             logger.warning(f"Podscan reported has_next=True but no next_page for '{keyword}'. Stopping.")
-                             break
+                            logger.warning(f"Podscan reported has_next=True but no next_page for '{keyword}'. Stopping.")
+                            break
                         current_page = next_page
                     else:
                         logger.debug(f"No more Podscan pages for keyword '{keyword}'.")
                         break # Exit while loop for this keyword
-                        
+            
             logger.info(f"Finished API searches for all keywords. Total ListenNotes raw results: {len(all_listennotes_raw_data)}, Total Podscan raw results: {len(all_podscan_raw_data)}")
             # --- End API Search & Pagination --- 
             
@@ -748,6 +746,7 @@ class SearchAgent:
         target_audience: str,
         key_messages: Optional[List[str]] = None,
         num_keywords_to_generate: int = 10,
+        max_results_per_keyword: int = 50, # New parameter
         campaign_id_prefix: str = "standalone_topic"
     ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         """
@@ -755,6 +754,7 @@ class SearchAgent:
         Does not interact with or require GraphState.
         """
         logger.info(f"--- Executing Standalone Topic Search for Target Audience: '{target_audience[:100]}...' ---")
+        logger.info(f"Max results per keyword API call set to: {max_results_per_keyword}") # Log new param
         start_time = time.time()
         
         # Generate a unique campaign_id for this standalone run (for CSV naming, logging)
@@ -788,22 +788,48 @@ class SearchAgent:
             for keyword in generated_keywords:
                 logger.info(f"--- Standalone search: Searching APIs for keyword: '{keyword}' ---")
                 current_offset = 0
+                ln_results_for_keyword = 0 # Counter for ListenNotes results for this keyword
                 while True:
+                    if ln_results_for_keyword >= max_results_per_keyword:
+                        logger.info(f"Reached max_results_per_keyword ({max_results_per_keyword}) for ListenNotes on keyword '{keyword}'. Moving to next API/keyword.")
+                        break
+                        
                     ln_page_data, ln_pagination = self.search_service.search_listennotes_paginated(keyword, offset=current_offset)
                     if ln_page_data and ln_page_data.get('results'):
-                        all_listennotes_raw_data.extend(ln_page_data['results'])
-                    if not ln_pagination or not ln_pagination.get("has_next") or ln_pagination.get("next_offset") is None:
+                        results_on_page = ln_page_data['results']
+                        # Check how many can be added without exceeding the limit
+                        can_add_count = max_results_per_keyword - ln_results_for_keyword
+                        to_add = results_on_page[:can_add_count]
+                        all_listennotes_raw_data.extend(to_add)
+                        ln_results_for_keyword += len(to_add)
+                        
+                    if not ln_pagination or not ln_pagination.get("has_next") or ln_pagination.get("next_offset") is None or ln_results_for_keyword >= max_results_per_keyword:
                         break
                     current_offset = ln_pagination["next_offset"]
                 
                 current_page = 1
+                ps_results_for_keyword = 0 # Counter for Podscan results for this keyword
                 while True:
+                    # Stop if combined LN and PS results reach the per-keyword maximum
+                    if ln_results_for_keyword + ps_results_for_keyword >= max_results_per_keyword:
+                        logger.info(f"Reached combined max_results_per_keyword ({max_results_per_keyword}) for keyword '{keyword}'. Moving to next keyword.")
+                        break
+
                     ps_page_data, ps_pagination = self.search_service.search_podscan_paginated(keyword, page=current_page)
                     if ps_page_data and ps_page_data.get('podcasts'):
-                        all_podscan_raw_data.extend(ps_page_data['podcasts'])
-                    if not ps_pagination or not ps_pagination.get("has_next") or ps_pagination.get("next_page") is None:
+                        results_on_page = ps_page_data['podcasts']
+                        # Calculate remaining quota across both APIs
+                        remaining_quota = max_results_per_keyword - (ln_results_for_keyword + ps_results_for_keyword)
+                        to_add = results_on_page[:remaining_quota]
+                        all_podscan_raw_data.extend(to_add)
+                        ps_results_for_keyword += len(to_add)
+                    else:
                         break
-                    current_page = ps_pagination["next_page"]
+
+                    # Stop if no further pages
+                    if not ps_pagination or not ps_pagination.get('has_next') or ps_pagination.get('next_page') is None:
+                        break
+                    current_page = ps_pagination['next_page']
             
             logger.info(f"Standalone search: Total LN raw: {len(all_listennotes_raw_data)}, Total PS raw: {len(all_podscan_raw_data)}")
 

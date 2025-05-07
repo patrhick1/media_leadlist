@@ -1,5 +1,6 @@
 import type { MetaFunction } from "@remix-run/node";
 import React, { useState, useEffect } from "react";
+import { useNavigate } from 'react-router';
 
 export const meta: MetaFunction = () => {
   return [
@@ -102,11 +103,13 @@ interface EnrichedPodcastProfile {
 
 export default function DiscoveryPage() {
   const [searchType, setSearchType] = useState<"topic" | "related">("topic");
+  const navigate = useNavigate();
   
   // Topic Search Form State
   const [targetAudience, setTargetAudience] = useState("");
   const [keyMessages, setKeyMessages] = useState("");
   const [numKeywords, setNumKeywords] = useState<number>(10);
+  const [maxResultsPerKeyword, setMaxResultsPerKeyword] = useState<number>(50);
 
   // Related Search Form State
   const [seedRssUrl, setSeedRssUrl] = useState("");
@@ -147,6 +150,7 @@ export default function DiscoveryPage() {
         target_audience: targetAudience,
         key_messages: keyMessages.split('\n').filter(km => km.trim() !== ""), // Split by newline
         num_keywords_to_generate: numKeywords,
+        max_results_per_keyword: maxResultsPerKeyword,
       };
     } else { // related search
       endpoint = `/actions/search/related`;
@@ -160,6 +164,7 @@ export default function DiscoveryPage() {
     try {
       const response = await fetch(endpoint, {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
@@ -167,6 +172,10 @@ export default function DiscoveryPage() {
       const data = await response.json();
 
       if (!response.ok) {
+        if (response.status === 401) {
+          localStorage.removeItem('isLoggedInPGL');
+          navigate('/login', { replace: true });
+        }
         throw new Error(data.detail || data.error || "Search failed");
       }
       
@@ -180,8 +189,13 @@ export default function DiscoveryPage() {
       }
 
     } catch (err: any) {
-      setError(err.message || "An unknown error occurred during search.");
-      setLeads([]);
+      if (err.message.includes("Session invalid")) {
+        localStorage.removeItem('isLoggedInPGL');
+        navigate('/login', { replace: true });
+      } else {
+        setError(err.message || "An unknown error occurred during search.");
+        setLeads([]);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -215,12 +229,17 @@ export default function DiscoveryPage() {
     try {
       const response = await fetch(endpoint, {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
       const data = await response.json();
 
       if (!response.ok) {
+        if (response.status === 401) {
+          localStorage.removeItem('isLoggedInPGL');
+          navigate('/login', { replace: true });
+        }
         throw new Error(data.detail || data.error || "Enrichment failed");
       }
       
@@ -235,8 +254,13 @@ export default function DiscoveryPage() {
         setDownloadCsvPath(data.csv_file_path); // Set CSV path for download
       }
     } catch (err: any) {
-      setError(err.message || "An unknown error occurred during enrichment.");
-      setEnrichedProfiles([]);
+      if (err.message.includes("Session invalid")) {
+        localStorage.removeItem('isLoggedInPGL');
+        navigate('/login', { replace: true });
+      } else {
+        setError(err.message || "An unknown error occurred during enrichment.");
+        setEnrichedProfiles([]);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -288,6 +312,12 @@ export default function DiscoveryPage() {
         Cell: ({ value }: { value: any }) => {
           if (header === 'image_url' && typeof value === 'string' && value) {
             return <img src={value} alt={header} className="h-10 w-10 object-cover" />;
+          } if (header === 'description') { // Specific handling for description
+            return (
+              <div className="max-w-md whitespace-normal break-words">
+                {value !== null && value !== undefined ? String(value) : 'N/A'}
+              </div>
+            );
           } if (header === 'social_links' && typeof value === 'object' && value && Object.keys(value).length > 0) {
             return (
               <ul className="list-disc list-inside text-xs">
@@ -331,6 +361,13 @@ export default function DiscoveryPage() {
             if ((header === 'image_url' || header === 'image') && typeof value === 'string' && value) {
               return <img src={value} alt={header} className="h-10 w-10 object-cover" />;
             }
+            if (header === 'description') { // Specific handling for description
+              return (
+                <div className="max-w-md whitespace-normal break-words">
+                  {value !== null && value !== undefined ? String(value) : 'N/A'}
+                </div>
+              );
+            }
             if (header === 'categories' && typeof value === 'object' && value && !Array.isArray(value)) {
               return Object.entries(value).map(([id, name]) => name).join(', ');
             }
@@ -350,7 +387,13 @@ export default function DiscoveryPage() {
           <thead className="bg-gray-50">
             <tr>
               {definedColumns.map((col) => (
-                <th key={col.Header} scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <th
+                  key={col.Header}
+                  scope="col"
+                  className={`px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider ${
+                    col.accessor === 'description' ? 'w-2/5' : col.accessor === 'title' ? 'w-1/5' : ''
+                  }`}
+                >
                   {col.Header}
                 </th>
               ))}
@@ -360,7 +403,12 @@ export default function DiscoveryPage() {
             {itemsToDisplay.map((item, index) => (
               <tr key={item.api_id || item.unified_profile_id || item.id || index} className={index % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                 {definedColumns.map((col) => (
-                  <td key={col.Header + (item.api_id || item.unified_profile_id || item.id || index)} className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                  <td
+                    key={col.Header + (item.api_id || item.unified_profile_id || item.id || index)}
+                    className={`px-6 py-4 whitespace-nowrap text-sm text-gray-700 ${
+                      col.accessor === 'description' ? 'w-2/5' : col.accessor === 'title' ? 'w-1/5' : ''
+                    }`}
+                  >
                     {col.Cell ? col.Cell({ value: (item as any)[col.accessor] }) : 
                      ((item as any)[col.accessor] !== null && (item as any)[col.accessor] !== undefined ? String((item as any)[col.accessor]) : 'N/A')}
                   </td>
@@ -442,14 +490,15 @@ export default function DiscoveryPage() {
                 />
               </div>
               <div>
-                <label htmlFor="keyMessages" className="block text-sm font-medium text-gray-700 mb-1">Key Messages (one per line, optional)</label>
+                <label htmlFor="keyMessages" className="block text-sm font-medium text-gray-700 mb-1">Describe the topic you would like to speak on</label>
                 <textarea
                   id="keyMessages"
                   value={keyMessages}
                   onChange={(e) => setKeyMessages(e.target.value)}
                   rows={3}
+                  required
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-                  placeholder="e.g., AI is transforming software development.\nOur tool simplifies AI integration."
+                  placeholder="e.g., The impact of generative AI on modern web development and user experience."
                 />
               </div>
               <div>
@@ -461,6 +510,19 @@ export default function DiscoveryPage() {
                   onChange={(e) => setNumKeywords(parseInt(e.target.value, 10))}
                   min="1"
                   max="30"
+                  required
+                  className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                />
+              </div>
+              <div>
+                <label htmlFor="maxResultsPerKeyword" className="block text-sm font-medium text-gray-700 mb-1">Max Results Per Keyword (1-200)</label>
+                <input
+                  type="number"
+                  id="maxResultsPerKeyword"
+                  value={maxResultsPerKeyword}
+                  onChange={(e) => setMaxResultsPerKeyword(parseInt(e.target.value, 10))}
+                  min="1"
+                  max="200"
                   required
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
                 />
