@@ -422,11 +422,15 @@ Response JSON (strictly adhere to the schema, using null for missing fields):
         gemini_structured_output: Optional[GeminiPodcastEnrichment] = None
         try:
             logger.debug(f"Sending combined text to Gemini for structured parsing: {podcast_name}")
-            gemini_structured_output = await asyncio.to_thread(
-                self.gemini_service.get_structured_podcast_enrichment,
-                final_parser_prompt
+            # Use the new generic method, passing the specific Pydantic model
+            gemini_output_untyped = await asyncio.to_thread(
+                self.gemini_service.get_structured_data, # Use generic method
+                final_parser_prompt,
+                GeminiPodcastEnrichment # Pass the target model
             )
-            if gemini_structured_output:
+            # Check if the returned object is of the expected type
+            if isinstance(gemini_output_untyped, GeminiPodcastEnrichment):
+                gemini_structured_output = gemini_output_untyped
                 logger.info(f"Successfully parsed combined text into structured output for {podcast_name}")
                 url_fields = [
                     'podcast_twitter_url', 'podcast_linkedin_url', 'podcast_instagram_url',

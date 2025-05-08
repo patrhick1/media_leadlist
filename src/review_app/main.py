@@ -41,6 +41,26 @@ from ..agents.enrichment_agent import EnrichmentAgent
 from ..models.podcast_profile import EnrichedPodcastProfile # For response model
 # --- END NEW ---
 
+# --- NEW: Import VettingAgent --- #
+from ..agents.vetting_agent import VettingAgent 
+# --- END NEW ---
+
+# --- NEW: Pydantic Models for Standalone Vetting --- #
+class StandaloneVettingRequest(BaseModel):
+    enriched_profiles: List[EnrichedPodcastProfile] = Field(..., description="List of enriched podcast profiles to vet.")
+    ideal_podcast_description: str = Field(..., description="Description of the ideal podcast for the guest/client.")
+    guest_bio: str = Field(..., description="Biography or background of the guest/client.")
+    guest_talking_points: List[str] = Field(..., description="Key talking points or angles for the guest/client.")
+    source_campaign_id: Optional[str] = Field(None, description="Optional campaign ID to link this vetting run, can be from a search or enrichment run.")
+
+class StandaloneVettingResponse(BaseModel):
+    message: str
+    count: int = Field(..., description="Number of profiles processed for vetting.")
+    vetting_results: List[VettingResult] = Field(default_factory=list, description="List of vetting results for each profile.")
+    csv_file_path: Optional[str] = Field(None, description="Web-accessible path to the CSV file containing vetting results.")
+    error: Optional[str] = Field(None, description="Overall error message if the vetting process encountered a major issue.")
+# --- END NEW VETTING MODELS --- 
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -191,21 +211,54 @@ class UserPreferences(BaseModel):
 DUMMY_LEADS = [
     LeadForReview(
         lead_info=PodcastLead(podcast_id="ln_1", name="Tech Unfiltered", description="Raw tech insights."),
-        vetting_info=VettingResult(podcast_id="ln_1", composite_score=88, quality_tier="A", explanation="Good consistency, recent.", metric_scores={})
-        # review_status remains "pending" by default
+        vetting_info=VettingResult(
+            podcast_id="ln_1", 
+            composite_score=88, 
+            quality_tier="A", 
+            # Add missing required fields with plausible defaults
+            programmatic_consistency_passed=True,
+            programmatic_consistency_reason="Recent and frequent (dummy data).",
+            final_explanation="Overall Tier: A (Score: 88/100). | Programmatic Consistency: Passed - Recent and frequent (dummy data). | LLM Content Match: Score N/A - Not performed on dummy data.", 
+            metric_scores={}
+            # Removed invalid 'explanation' field
+        )
     ),
     LeadForReview(
         lead_info=PodcastLead(podcast_id="ps_2", name="Startup Hustle", description="Founder interviews.", email="hustle@startup.com"),
-        vetting_info=VettingResult(podcast_id="ps_2", composite_score=65, quality_tier="B", explanation="Okay count, less consistent.", metric_scores={}),
+        vetting_info=VettingResult(
+            podcast_id="ps_2", 
+            composite_score=65, 
+            quality_tier="B", 
+            programmatic_consistency_passed=True,
+            programmatic_consistency_reason="Okay frequency (dummy data).",
+            final_explanation="Overall Tier: B (Score: 65/100). | Programmatic Consistency: Passed - Okay frequency (dummy data). | LLM Content Match: Score N/A - Not performed on dummy data.", 
+            metric_scores={}
+        ),
         review_status="approved" # Example approved lead
     ),
     LeadForReview(
         lead_info=PodcastLead(podcast_id="ln_3", name="AI Today", description="Latest in AI."),
-        vetting_info=VettingResult(podcast_id="ln_3", composite_score=42, quality_tier="C", explanation="Low episode count.", metric_scores={})
+        vetting_info=VettingResult(
+            podcast_id="ln_3", 
+            composite_score=42, 
+            quality_tier="C", 
+            programmatic_consistency_passed=False,
+            programmatic_consistency_reason="Infrequent (dummy data).",
+            final_explanation="Overall Tier: C (Score: 42/100). | Programmatic Consistency: Failed - Infrequent (dummy data). | LLM Content Match: Score N/A - Not performed on dummy data.",
+            metric_scores={}
+        )
     ),
     LeadForReview(
         lead_info=PodcastLead(podcast_id="ps_4", name="Marketing Mavericks", description="Marketing tips."),
-        vetting_info=VettingResult(podcast_id="ps_4", composite_score=78, quality_tier="B", explanation="Recent, good count.", metric_scores={})
+        vetting_info=VettingResult(
+            podcast_id="ps_4", 
+            composite_score=78, 
+            quality_tier="B", 
+            programmatic_consistency_passed=True,
+            programmatic_consistency_reason="Recent, good count (dummy data).",
+            final_explanation="Overall Tier: B (Score: 78/100). | Programmatic Consistency: Passed - Recent, good count (dummy data). | LLM Content Match: Score N/A - Not performed on dummy data.",
+            metric_scores={}
+        )
     )
 ]
 
@@ -755,7 +808,8 @@ async def run_campaign_workflow_sync(
 # Instantiate agents (consider if they should be global or per-request)
 # For simplicity, global for now, but for production, consider FastAPI dependencies for stateful services.
 search_agent_instance = SearchAgent()
-enrichment_agent_instance = EnrichmentAgent() # Instantiate EnrichmentAgent
+enrichment_agent_instance = EnrichmentAgent()
+vetting_agent_instance = VettingAgent() # NEW: Instantiate VettingAgent
 
 @app.post("/actions/search/topic", response_model=StandaloneSearchResponse, tags=["Actions", "Search"])
 async def trigger_standalone_topic_search(
@@ -854,6 +908,45 @@ async def trigger_standalone_enrichment(
             error=str(e)
         )
 # --- END NEW STANDALONE ENRICHMENT --- 
+
+# --- NEW: Standalone Vetting Endpoint --- #
+@app.post("/actions/vet", response_model=StandaloneVettingResponse, tags=["Actions", "Vetting"])
+async def trigger_standalone_vetting(
+    request_data: StandaloneVettingRequest,
+    current_user: dict = Depends(get_current_user_from_token) # Protected
+):
+    """Triggers standalone vetting for a list of enriched podcast profiles based on specified criteria."""
+    logger.info(f"User {current_user} - Received standalone vetting request for {len(request_data.enriched_profiles)} profiles. Source Campaign ID: {request_data.source_campaign_id}")
+    if not request_data.enriched_profiles:
+        return StandaloneVettingResponse(
+            message="No enriched profiles provided for vetting.",
+            count=0,
+            vetting_results=[],
+            error="Input list of enriched_profiles was empty."
+        )
+    try:
+        vetting_results, csv_path = await vetting_agent_instance.perform_standalone_vetting(
+            enriched_profiles=request_data.enriched_profiles,
+            ideal_podcast_description=request_data.ideal_podcast_description,
+            guest_bio=request_data.guest_bio,
+            guest_talking_points=request_data.guest_talking_points,
+            source_campaign_id=request_data.source_campaign_id
+        )
+        return StandaloneVettingResponse(
+            message=f"Standalone vetting completed. Processed {len(request_data.enriched_profiles)} profiles.",
+            count=len(request_data.enriched_profiles),
+            vetting_results=vetting_results,
+            csv_file_path=csv_path
+        )
+    except Exception as e:
+        logger.exception(f"Error during standalone vetting: {e}")
+        return StandaloneVettingResponse(
+            message="Standalone vetting failed.",
+            count=len(request_data.enriched_profiles), # Count of profiles attempted
+            vetting_results=[], # Or potentially return partial results if any were processed before error
+            error=str(e)
+        )
+# --- END NEW STANDALONE VETTING --- 
 
 # --- Old Background Workflow Trigger Endpoint (COMMENTED OUT) --- #
 # @app.post("/campaigns/run_background", status_code=202, tags=["Workflow"])

@@ -12,6 +12,10 @@ class CampaignConfiguration(BaseModel):
     search_type: Literal["topic", "related"] = "topic"
     seed_rss_url: Optional[str] = None
 
+    ideal_podcast_description: Optional[str] = None
+    guest_bio: Optional[str] = None
+    guest_talking_points: Optional[List[str]] = None
+
     class Config:
         validate_assignment = True
         extra = 'forbid' # Ensure no extra fields are allowed 

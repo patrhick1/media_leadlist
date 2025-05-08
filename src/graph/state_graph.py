@@ -111,81 +111,32 @@ def search_agent_node(state: GraphState) -> GraphState:
         return state
 
 def vetting_agent_node(state: GraphState) -> GraphState:
-    """Node that executes the vetting agent."""
+    """Node that executes the vetting agent in graph mode."""
     logger.info("--- Calling Vetting Agent Node --- ")
-    start_time = time.time() # Record start time
-    agent_state = state['agent_state']
-    campaign_id = agent_state.campaign_config.campaign_id if agent_state.campaign_config else None
-    metrics_service = None # Initialize
-    final_status = "node_failed" # Default status
-    processed_count = 0
-    error_count = 0
-    
     try:
-        # Initialize metrics service inside the node
-        metrics_service = MetricsService()
-        if metrics_service:
-             metrics_service.record_event(
-                event_name="agent_step_start", 
-                agent_step="vetting",
-                campaign_id=campaign_id
-            )
-        else:
-             logger.error("Failed to initialize MetricsService in vetting_agent_node.")
-             # Allow execution to continue but metrics won't be recorded
-             
-        # Ensure leads are present from the previous step
-        if not state['agent_state'].leads:
-            logger.warning("No leads found in state for vetting. Skipping vetting step.")
-            state['agent_state'].current_step = "enrichment"
-            state['agent_state'].execution_status = "vetting_skipped_no_leads"
-            final_status = state['agent_state'].execution_status
-            return state
-
-        agent = VettingAgent() # VettingAgent itself now initializes MetricsService too
-        updated_state = agent.run_vetting(state) # run_vetting records individual podcast metrics
+        # Instantiate the agent
+        agent = VettingAgent() 
         
-        # Update final status based on agent execution
-        final_status = updated_state['agent_state'].execution_status 
-        # Get counts from metadata recorded by the agent (if we want overall counts here)
-        # This might require adjusting run_vetting to return counts or storing them in state
-        # For now, we rely on metrics recorded within run_vetting/vet_podcasts_batch
-        if updated_state['agent_state'].vetting_results:
-            processed_count = len(updated_state['agent_state'].vetting_results)
-            error_count = sum(1 for r in updated_state['agent_state'].vetting_results if r is None or r.quality_tier == "Error")
-            
+        # The agent method is async, run it using asyncio.run()
+        # This will block the node until the async function completes.
+        # It returns the modified GraphState dictionary.
+        updated_state = asyncio.run(agent.run_vetting_graph_mode(state)) 
         return updated_state
         
     except Exception as e:
-        logger.exception("Critical error in vetting_agent_node execution.")
-        state['agent_state'].current_step = "error"
-        state['agent_state'].execution_status = "node_failed"
+        logger.exception("Critical error in vetting_agent_node execution (before or during agent call).")
+        # Ensure agent_state exists before trying to modify it
+        if 'agent_state' in state:
+             state['agent_state'].current_step = "error"
+             state['agent_state'].execution_status = "vetting_node_failed_critically"
+        else:
+             # Create a minimal error state if agent_state doesn't exist
+             state['agent_state'] = AgentState(current_step="error", execution_status="vetting_node_failed_critically")
         state['error_message'] = f"Vetting node failed critically: {e}"
-        final_status = state['agent_state'].execution_status
-        # Record node error metric
-        if metrics_service:
-            metrics_service.record_event(
-                event_name="error", 
-                agent_step="vetting",
-                campaign_id=campaign_id,
-                metadata={"error_type": "NodeExecution", "error_message": str(e)}
-            )
+        # Log error metric if possible (MetricsService might not be available here)
+        # metrics_service = MetricsService()
+        # if metrics_service: ...
         return state
-    finally:
-         # Record end event
-        if metrics_service:
-            duration_ms = (time.time() - start_time) * 1000
-            metrics_service.record_event(
-                event_name="agent_step_end", 
-                agent_step="vetting",
-                campaign_id=campaign_id,
-                duration_ms=duration_ms,
-                metadata={
-                    "final_status": final_status,
-                    "total_leads_processed_in_node": processed_count,
-                    "vetting_errors_in_node": error_count
-                }
-            )
 
 def enrichment_agent_node(state: GraphState) -> GraphState:
     """Node that executes the enrichment agent."""

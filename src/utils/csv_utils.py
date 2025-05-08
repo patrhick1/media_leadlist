@@ -8,6 +8,7 @@ import json # Import json for handling social links list
 # Static type checkers (e.g., Pylance) need to resolve the forward reference
 if TYPE_CHECKING:
     from ..models.podcast_profile import EnrichedPodcastProfile  # pragma: no cover
+    from ..models.vetting import VettingResult # Added VettingResult here
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,15 @@ ENRICHED_CSV_HEADERS = [
     'spotify_rating_count', 'twitter_followers', 'linkedin_connections',
     # Metadata
     'data_sources', 'last_enriched_timestamp'
+]
+
+# --- New: Headers and writer for vetting results ---
+VETTING_CSV_HEADERS = [
+    'podcast_id', 'quality_tier', 'composite_score',
+    'programmatic_consistency_passed', 'programmatic_consistency_reason',
+    'llm_match_score', 'llm_match_explanation',
+    'final_explanation', 'days_since_last_episode', 'average_frequency_days',
+    'last_episode_date', 'error', 'metric_scores' # Added metric_scores
 ]
 
 def write_dicts_to_csv(data: List[Dict[str, Any]], filename: str):
@@ -164,6 +174,63 @@ def write_enriched_profiles_to_csv(profiles: List['EnrichedPodcastProfile'], fil
         logger.error(f"Error writing enriched CSV {filename}: {e}")
     except Exception as e:
         logger.exception(f"Unexpected error writing enriched CSV {filename}: {e}")
+
+def write_vetting_results_to_csv(results: List['VettingResult'], filename: str):
+    """Writes all vetting result fields to CSV.
+
+    The header list is generated dynamically by:
+    1. Taking the field order from `VettingResult` model.
+    2. Adding any extra keys that appear in the dumped rows.
+    This guarantees the CSV will always include every vetting field.
+    """
+
+    if not results:
+        logger.warning(f"No vetting results provided to write to CSV file: {filename}")
+        return
+
+    # Lazy import here to avoid circular dependency issues if VettingResult is used elsewhere
+    from ..models.vetting import VettingResult # type: ignore
+
+    dict_rows: List[Dict[str, Any]] = []
+    all_keys: set[str] = set()
+
+    for result in results:
+        if not isinstance(result, VettingResult):
+            logger.warning(f"Skipping non-VettingResult object: {result}")
+            continue
+
+        # Dump the model, ensuring metric_scores (a dict) is handled by _serialize_value
+        raw_row = result.model_dump(mode='python', exclude_none=False)
+
+        serialized_row: Dict[str, Any] = {}
+        for key, val in raw_row.items():
+            serialized_row[key] = _serialize_value(key, val) # _serialize_value handles dicts via json.dumps
+        
+        dict_rows.append(serialized_row)
+        all_keys.update(serialized_row.keys())
+
+    if not dict_rows:
+        logger.warning("No valid vetting results to write.")
+        return
+
+    # Build header list preserving model field order first
+    model_field_order = list(VettingResult.model_fields.keys())
+    header_order: List[str] = [f for f in model_field_order if f in all_keys]
+    header_order.extend([k for k in sorted(all_keys) if k not in header_order])
+
+    # Ensure directory exists
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+
+    try:
+        with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=header_order, extrasaction='ignore')
+            writer.writeheader()
+            writer.writerows(dict_rows)
+        logger.info(f"Successfully wrote {len(dict_rows)} vetting results to {filename} with {len(header_order)} columns")
+    except IOError as e:
+        logger.error(f"Error writing vetting CSV {filename}: {e}")
+    except Exception as e:
+        logger.exception(f"Unexpected error writing vetting CSV {filename}: {e}")
 
 # Example usage (optional)
 # if __name__ == '__main__':
