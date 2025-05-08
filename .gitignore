@@ -55,3 +55,9 @@ task-master.ai/
 # Replit specific files
 .replit
 replit.nix
+
+# Ignore scripts directory
+scripts/
+
+# Ignore data directory
+data/
