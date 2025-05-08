@@ -314,14 +314,30 @@ class DataMerger:
         # --- NEW: Populate date/frequency fields from base_unified_data --- 
         # Convert ms timestamps to datetime objects
         try:
-            latest_ms = base_unified_data.get('latest_pub_date_ms')
+            latest_ms_val = base_unified_data.get('latest_pub_date_ms')
+            earliest_ms_val = base_unified_data.get('earliest_pub_date_ms')
+            freq_hours_val = base_unified_data.get('update_frequency_hours')
+
+            # Attempt conversion if values are strings
+            if isinstance(latest_ms_val, str) and latest_ms_val.strip():
+                try: latest_ms_val = float(latest_ms_val) 
+                except ValueError: latest_ms_val = None
+            if isinstance(earliest_ms_val, str) and earliest_ms_val.strip():
+                try: earliest_ms_val = float(earliest_ms_val)
+                except ValueError: earliest_ms_val = None
+            if isinstance(freq_hours_val, str) and freq_hours_val.strip():
+                try: freq_hours_val = float(freq_hours_val)
+                except ValueError: freq_hours_val = None
+
+            # Process numeric values
+            latest_ms = latest_ms_val
             if latest_ms and isinstance(latest_ms, (int, float)):
                 profile.latest_episode_date = datetime.fromtimestamp(latest_ms / 1000.0)
             else:
                 # Keep any value already set (e.g., from RSS if logic existed)
                 profile.latest_episode_date = profile.latest_episode_date 
                 
-            earliest_ms = base_unified_data.get('earliest_pub_date_ms')
+            earliest_ms = earliest_ms_val
             if earliest_ms and isinstance(earliest_ms, (int, float)):
                 profile.first_episode_date = datetime.fromtimestamp(earliest_ms / 1000.0)
             else:
@@ -333,7 +349,7 @@ class DataMerger:
 
         # Convert update frequency hours to days
         try:
-            freq_hours = base_unified_data.get('update_frequency_hours')
+            freq_hours = freq_hours_val
             if freq_hours and isinstance(freq_hours, (int, float)) and freq_hours > 0:
                 profile.publishing_frequency_days = freq_hours / 24.0
             else:

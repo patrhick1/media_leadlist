@@ -138,7 +138,7 @@ export default function DiscoveryPage() {
   const [enrichedProfiles, setEnrichedProfiles] = useState<EnrichedPodcastProfile[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [lastOperation, setLastOperation] = useState<"search" | "enrich" | "vet" | null>(null);
+  const [lastOperation, setLastOperation] = useState<"search" | "enrich" | "vet" | "enrich_csv" | "vet_csv" | null>(null);
   const [downloadCsvPath, setDownloadCsvPath] = useState<string | null>(null);
 
   // --- NEW State for Vetting --- //
@@ -149,15 +149,21 @@ export default function DiscoveryPage() {
   const [vettingResults, setVettingResults] = useState<VettingResult[]>([]); // To store vetting results
   // --- END NEW Vetting State --- //
 
+  // --- NEW State for CSV Uploads --- //
+  const [enrichCsvFile, setEnrichCsvFile] = useState<File | null>(null);
+  const [vetCsvFile, setVetCsvFile] = useState<File | null>(null);
+  const [sourceCampaignIdForCsv, setSourceCampaignIdForCsv] = useState<string>("");
+  // --- END NEW CSV Upload State --- //
+
   // --- Moved Memoization Here (Fix for Hook Error) ---
   const itemsToDisplay = useMemo(() => 
-    lastOperation === 'vet' && vettingResults.length > 0 ? vettingResults :
-    lastOperation === 'enrich' && enrichedProfiles.length > 0 ? enrichedProfiles :
+    (lastOperation === 'vet' || lastOperation === 'vet_csv') && vettingResults.length > 0 ? vettingResults :
+    (lastOperation === 'enrich' || lastOperation === 'enrich_csv') && enrichedProfiles.length > 0 ? enrichedProfiles :
     leads
   , [lastOperation, vettingResults, enrichedProfiles, leads]);
 
-  const isEnrichedView = useMemo(() => lastOperation === 'enrich' && enrichedProfiles.length > 0, [lastOperation, enrichedProfiles]);
-  const isVettingView = useMemo(() => lastOperation === 'vet' && vettingResults.length > 0, [lastOperation, vettingResults]);
+  const isEnrichedView = useMemo(() => (lastOperation === 'enrich' || lastOperation === 'enrich_csv') && enrichedProfiles.length > 0, [lastOperation, enrichedProfiles]);
+  const isVettingView = useMemo(() => (lastOperation === 'vet' || lastOperation === 'vet_csv') && vettingResults.length > 0, [lastOperation, vettingResults]);
 
   const columns = useMemo(() => {
     let definedColumns: { Header: string; accessor: string; Cell?: (cell: any) => React.ReactNode }[] = [];
@@ -311,6 +317,8 @@ export default function DiscoveryPage() {
     setError(null);
     setDownloadCsvPath(null);
     setShowVettingForm(false); // Hide vetting form
+    setEnrichCsvFile(null); // Clear CSV file
+    setVetCsvFile(null); // Clear CSV file
     setLastOperation(null);
   };
 
@@ -371,6 +379,12 @@ export default function DiscoveryPage() {
         console.log("Search CSV available at:", data.csv_file_path);
         setDownloadCsvPath(data.csv_file_path); // Set CSV path for download
       }
+      // Ensure other views are cleared
+      setEnrichedProfiles([]);
+      setVettingResults([]);
+      setShowVettingForm(false);
+      setEnrichCsvFile(null);
+      setVetCsvFile(null);
 
     } catch (err: any) {
       if (err.message.includes("Session invalid")) {
@@ -397,6 +411,7 @@ export default function DiscoveryPage() {
     setLastOperation("enrich");
     setDownloadCsvPath(null);
     setShowVettingForm(false); // Hide vetting form initially
+    setVetCsvFile(null); // Clear vet CSV file
 
     const endpoint = `/actions/enrich`;
     // Link enrichment using the *first* source lead's api_id for potential tracking
@@ -436,6 +451,10 @@ export default function DiscoveryPage() {
         console.log("Enrichment CSV available at:", data.csv_file_path);
         setDownloadCsvPath(data.csv_file_path); // Set CSV path for download
       }
+      // Ensure other views are cleared
+      setLeads([]); // Clear original search leads if enrichment was successful from them
+      setVettingResults([]);
+      setVetCsvFile(null);
     } catch (err: any) {
       if (err.message.includes("Session invalid")) {
         localStorage.removeItem('isLoggedInPGL');
@@ -588,6 +607,152 @@ export default function DiscoveryPage() {
   const isSearching = isLoading && lastOperation === 'search';
   const isEnriching = isLoading && lastOperation === 'enrich';
   const isVetting = isLoading && lastOperation === 'vet';
+  const isEnrichingCsv = isLoading && lastOperation === 'enrich_csv';
+  const isVettingCsv = isLoading && lastOperation === 'vet_csv';
+
+  // --- NEW: CSV Upload Handlers ---
+  const handleEnrichCsvFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (event.target.files && event.target.files[0]) {
+      setEnrichCsvFile(event.target.files[0]);
+    } else {
+      setEnrichCsvFile(null);
+    }
+  };
+
+  const handleVetCsvFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (event.target.files && event.target.files[0]) {
+      setVetCsvFile(event.target.files[0]);
+    } else {
+      setVetCsvFile(null);
+    }
+  };
+
+  const handleSubmitEnrichFromCsv = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!enrichCsvFile) {
+      setError("Please select a CSV file to enrich.");
+      return;
+    }
+    setIsLoading(true);
+    setError(null);
+    setEnrichedProfiles([]);
+    setVettingResults([]);
+    setLeads([]); // Clear any previous search leads
+    setLastOperation("enrich_csv");
+    setDownloadCsvPath(null);
+    setShowVettingForm(false);
+
+    const formData = new FormData();
+    formData.append("file", enrichCsvFile);
+    if (sourceCampaignIdForCsv) {
+      formData.append("source_campaign_id", sourceCampaignIdForCsv);
+    }
+
+    try {
+      const response = await fetch("/actions/enrich/csv", {
+        method: "POST",
+        credentials: "include",
+        body: formData, // No Content-Type header needed for FormData
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        if (response.status === 401) {
+          localStorage.removeItem('isLoggedInPGL');
+          navigate('/login', { replace: true });
+        }
+        throw new Error(data.detail || data.error || "Enrichment from CSV failed");
+      }
+
+      setEnrichedProfiles(data.enriched_profiles || []);
+      if (data.enriched_profiles && data.enriched_profiles.length === 0) {
+        setError("Enrichment from CSV completed but no profiles were returned.");
+      }
+      if (data.csv_file_path) {
+        setDownloadCsvPath(data.csv_file_path);
+      }
+       // Ensure other views are cleared
+      setVettingResults([]);
+      setVetCsvFile(null);
+    } catch (err: any) {
+      if (err.message.includes("Session invalid")) {
+        localStorage.removeItem('isLoggedInPGL');
+        navigate('/login', { replace: true });
+      } else {
+        setError(err.message || "An unknown error occurred during CSV enrichment.");
+        setEnrichedProfiles([]);
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSubmitVetFromCsv = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!vetCsvFile) {
+      setError("Please select a CSV file to vet.");
+      return;
+    }
+    if (!idealPodcastDescription || !guestBio || !guestTalkingPoints) {
+      setError("Please fill in all vetting criteria fields (Ideal Podcast Description, Guest Bio, Guest Talking Points).");
+      return;
+    }
+
+    setIsLoading(true);
+    setError(null);
+    setVettingResults([]);
+    setEnrichedProfiles([]); // Clear any previous enriched profiles
+    setLeads([]); // Clear any previous search leads
+    setLastOperation("vet_csv");
+    setDownloadCsvPath(null);
+
+    const formData = new FormData();
+    formData.append("file", vetCsvFile);
+    formData.append("ideal_podcast_description", idealPodcastDescription);
+    formData.append("guest_bio", guestBio);
+    formData.append("guest_talking_points_str", guestTalkingPoints); // Backend expects guest_talking_points_str
+    if (sourceCampaignIdForCsv) {
+      formData.append("source_campaign_id", sourceCampaignIdForCsv);
+    }
+    
+    try {
+      const response = await fetch("/actions/vet/csv", {
+        method: "POST",
+        credentials: "include",
+        body: formData, // No Content-Type header needed for FormData
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        if (response.status === 401) {
+          localStorage.removeItem('isLoggedInPGL');
+          navigate('/login', { replace: true });
+        }
+        throw new Error(data.detail || data.error || "Vetting from CSV failed");
+      }
+      
+      setVettingResults(data.vetting_results || []);
+      if (data.vetting_results && data.vetting_results.length === 0) {
+        setError("Vetting from CSV completed but no results were returned.");
+      }
+      if (data.csv_file_path) {
+        setDownloadCsvPath(data.csv_file_path);
+      }
+      // Ensure other views are cleared
+      setEnrichedProfiles([]);
+      setEnrichCsvFile(null);
+    } catch (err: any) {
+      if (err.message.includes("Session invalid")) {
+        localStorage.removeItem('isLoggedInPGL');
+        navigate('/login', { replace: true });
+      } else {
+        setError(err.message || "An unknown error occurred during CSV vetting.");
+        setVettingResults([]);
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   return (
     <div className="container mx-auto p-4 md:p-8 font-sans">
@@ -858,6 +1023,120 @@ export default function DiscoveryPage() {
             </p>
         </div>
       )}
+
+      {/* --- NEW CSV Upload Sections --- */}
+      <section className="my-8 p-6 bg-white shadow-md rounded-lg border border-gray-200">
+        <h2 className="text-xl font-semibold text-gray-700 mb-4">Alternative Actions: Upload CSV</h2>
+        
+        {/* Enrich from CSV Form */}
+        <form onSubmit={handleSubmitEnrichFromCsv} className="mb-6 p-4 border rounded-md bg-gray-50">
+          <h3 className="text-lg font-medium text-gray-800 mb-3">1. Enrich Leads from CSV</h3>
+          <p className="text-sm text-gray-600 mb-2">Upload a CSV file containing podcast leads (e.g., from a previous search or external source). Expected columns might include: title, rss_url, description, etc.</p>
+          <div className="space-y-3">
+            <div>
+              <label htmlFor="enrichCsvFile" className="block text-sm font-medium text-gray-700 mb-1">CSV File for Enrichment</label>
+              <input
+                type="file"
+                id="enrichCsvFile"
+                accept=".csv"
+                onChange={handleEnrichCsvFileChange}
+                className="mt-1 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+              />
+            </div>
+            <div>
+              <label htmlFor="sourceCampaignIdEnrich" className="block text-sm font-medium text-gray-700 mb-1">Optional: Source Campaign ID</label>
+              <input
+                type="text"
+                id="sourceCampaignIdEnrich"
+                value={sourceCampaignIdForCsv}
+                onChange={(e) => setSourceCampaignIdForCsv(e.target.value)}
+                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                placeholder="e.g., previous_search_run_id_123"
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={isLoading || !enrichCsvFile}
+              className="w-full md:w-auto py-2 px-6 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-teal-600 hover:bg-teal-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-teal-500 disabled:bg-gray-400"
+            >
+              {isEnrichingCsv ? "Enriching from CSV..." : "Enrich from CSV"}
+            </button>
+          </div>
+        </form>
+
+        {/* Vet from CSV Form */}
+        <form onSubmit={handleSubmitVetFromCsv} className="p-4 border rounded-md bg-gray-50">
+          <h3 className="text-lg font-medium text-gray-800 mb-3">2. Vet Enriched Profiles from CSV</h3>
+           <p className="text-sm text-gray-600 mb-2">Upload a CSV file containing already enriched podcast profiles. Expected columns should match the enriched profile structure (e.g., title, description, rss_feed_url, latest_episode_date, total_episodes, etc.).</p>
+          <div className="space-y-3">
+            <div>
+              <label htmlFor="vetCsvFile" className="block text-sm font-medium text-gray-700 mb-1">CSV File for Vetting</label>
+              <input
+                type="file"
+                id="vetCsvFile"
+                accept=".csv"
+                onChange={handleVetCsvFileChange}
+                className="mt-1 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-purple-50 file:text-purple-700 hover:file:bg-purple-100"
+              />
+            </div>
+             <div>
+                <label htmlFor="idealPodcastDescCsv" className="block text-sm font-medium text-gray-700 mb-1">Ideal Podcast Description</label>
+                <textarea
+                    id="idealPodcastDescCsv"
+                    value={idealPodcastDescription} // Reusing existing state
+                    onChange={(e) => setIdealPodcastDescription(e.target.value)}
+                    rows={3}
+                    required
+                    className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                    placeholder="Describe the perfect podcast characteristics..."
+                />
+            </div>
+            <div>
+                <label htmlFor="guestBioCsv" className="block text-sm font-medium text-gray-700 mb-1">Guest Bio</label>
+                <textarea
+                    id="guestBioCsv"
+                    value={guestBio} // Reusing existing state
+                    onChange={(e) => setGuestBio(e.target.value)}
+                    rows={3}
+                    required
+                    className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                    placeholder="Provide the bio of the guest..."
+                />
+            </div>
+            <div>
+                <label htmlFor="guestTalkingPointsCsv" className="block text-sm font-medium text-gray-700 mb-1">Guest Talking Points (One per line)</label>
+                <textarea
+                    id="guestTalkingPointsCsv"
+                    value={guestTalkingPoints} // Reusing existing state
+                    onChange={(e) => setGuestTalkingPoints(e.target.value)}
+                    rows={4}
+                    required
+                    className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                    placeholder="List key topics, angles, or stories..."
+                />
+            </div>
+             <div>
+              <label htmlFor="sourceCampaignIdVet" className="block text-sm font-medium text-gray-700 mb-1">Optional: Source Campaign ID</label>
+              <input
+                type="text"
+                id="sourceCampaignIdVet"
+                value={sourceCampaignIdForCsv} // Can share state or have separate ones if needed
+                onChange={(e) => setSourceCampaignIdForCsv(e.target.value)}
+                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                placeholder="e.g., previous_enrichment_run_id_456"
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={isLoading || !vetCsvFile}
+              className="w-full md:w-auto py-2 px-6 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:bg-gray-400"
+            >
+              {isVettingCsv ? "Vetting from CSV..." : "Vet from CSV"}
+            </button>
+          </div>
+        </form>
+      </section>
+      {/* --- END NEW CSV Upload Sections --- */}
     </div>
   );
 } 

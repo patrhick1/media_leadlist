@@ -2,7 +2,10 @@ import logging
 import hmac
 import hashlib
 import os
-from fastapi import FastAPI, HTTPException, Query, Request, Header, BackgroundTasks, Depends, status, Response, Cookie
+import csv
+import io
+import json
+from fastapi import FastAPI, HTTPException, Query, Request, Header, BackgroundTasks, Depends, status, Response, Cookie, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -60,6 +63,20 @@ class StandaloneVettingResponse(BaseModel):
     csv_file_path: Optional[str] = Field(None, description="Web-accessible path to the CSV file containing vetting results.")
     error: Optional[str] = Field(None, description="Overall error message if the vetting process encountered a major issue.")
 # --- END NEW VETTING MODELS --- 
+
+# --- NEW: Model for Vetting Criteria from CSV form data --- #
+class VettingCriteriaFormData(BaseModel):
+    ideal_podcast_description: str
+    guest_bio: str
+    guest_talking_points_str: str # Will be a comma-separated string or newline-separated
+
+    @property
+    def guest_talking_points(self) -> List[str]:
+        # Split by newline first, then filter out empty strings
+        points = [p.strip() for p in self.guest_talking_points_str.split('\n') if p.strip()]
+        if not points and self.guest_talking_points_str.strip(): # Fallback for comma separation if newline yields nothing but string is not empty
+            points = [p.strip() for p in self.guest_talking_points_str.split(',') if p.strip()]
+        return points
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -947,6 +964,298 @@ async def trigger_standalone_vetting(
             error=str(e)
         )
 # --- END NEW STANDALONE VETTING --- 
+
+# --- NEW: Helper function to parse CSV --- #
+async def parse_csv_to_dicts(file: UploadFile) -> List[Dict[str, Any]]:
+    contents = await file.read()
+    # Use io.StringIO to treat the byte string as a file for csv.reader
+    # Decode bytes to string assuming UTF-8 encoding
+    try:
+        text_content = contents.decode('utf-8')
+    except UnicodeDecodeError:
+        # Fallback or raise specific error for encoding issues
+        logger.warning("CSV file is not UTF-8 encoded, trying latin-1")
+        try:
+            text_content = contents.decode('latin-1') # Common alternative
+        except UnicodeDecodeError as e:
+            logger.error(f"Failed to decode CSV with UTF-8 and latin-1: {e}")
+            raise HTTPException(status_code=400, detail=f"Invalid CSV encoding. Please use UTF-8 or Latin-1. Error: {e}")
+
+    # Check for Byte Order Mark (BOM) for UTF-8, which can cause issues with DictReader
+    if text_content.startswith('\ufeff'):
+        logger.info("UTF-8 BOM detected and removed from CSV content.")
+        text_content = text_content[1:]
+
+    file_like_object = io.StringIO(text_content)
+    
+    # Sniff dialect to handle various CSV formats (e.g. comma or semicolon separated)
+    try:
+        # Read more data for sniffing, ensure it's enough for varied CSVs
+        sample = file_like_object.read(min(2048, len(text_content))) # Read up to 2KB or whole content if smaller
+        dialect = csv.Sniffer().sniff(sample)
+        file_like_object.seek(0) # Reset read pointer
+        reader = csv.DictReader(file_like_object, dialect=dialect)
+        logger.info(f"CSV dialect sniffed: delimiter='{dialect.delimiter}', quotechar='{dialect.quotechar}'")
+    except csv.Error as e:
+        logger.warning(f"Could not sniff CSV dialect: {e}. Falling back to default comma delimiter.")
+        file_like_object.seek(0) # Reset read pointer
+        reader = csv.DictReader(file_like_object) # Default assumes comma delimiter
+        
+    data = [row for row in reader]
+    await file.close() # Ensure the uploaded file is closed
+    return data
+
+# --- NEW: Helper function to check required headers ---
+def check_required_headers(csv_headers: List[str], required_headers: List[str]):
+    missing_headers = [header for header in required_headers if header not in csv_headers]
+    if missing_headers:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Missing required CSV columns: {', '.join(missing_headers)}"
+        )
+
+# --- NEW: Standalone Enrichment from CSV Endpoint ---
+@app.post("/actions/enrich/csv", response_model=StandaloneEnrichmentResponse, tags=["Actions", "Enrichment", "CSV Upload"])
+async def trigger_standalone_enrichment_from_csv(
+    file: UploadFile = File(..., description="CSV file containing podcast leads to enrich."),
+    source_campaign_id: Optional[str] = Form(None, description="Optional campaign ID to link this enrichment run."),
+    current_user: dict = Depends(get_current_user_from_token) # Protected
+):
+    logger.info(f"User {current_user} - Received standalone enrichment request from CSV. Source Campaign ID: {source_campaign_id}")
+    if not file.filename or not file.filename.endswith('.csv'): # Added check for file.filename existence
+        raise HTTPException(status_code=400, detail="Invalid file type or no filename. Please upload a CSV file.")
+
+    try:
+        leads_to_enrich = await parse_csv_to_dicts(file)
+        logger.info(f"Successfully parsed {len(leads_to_enrich)} leads from uploaded CSV.")
+    except HTTPException as e: # Re-raise HTTPExceptions from parser
+        raise e
+    except Exception as e:
+        logger.exception(f"Error parsing CSV for enrichment: {e}")
+        return StandaloneEnrichmentResponse(
+            message="Failed to parse uploaded CSV file.",
+            count=0,
+            enriched_profiles=[],
+            error=f"CSV Parsing Error: {str(e)}"
+        )
+
+    if not leads_to_enrich:
+        return StandaloneEnrichmentResponse(
+            message="No leads found in the uploaded CSV or CSV was empty.",
+            count=0,
+            enriched_profiles=[],
+            error="CSV contained no data."
+        )
+    
+    try:
+        enriched_profiles, csv_path = await enrichment_agent_instance.perform_standalone_enrichment(
+            leads_to_enrich=leads_to_enrich,
+            existing_campaign_id=source_campaign_id
+        )
+        return StandaloneEnrichmentResponse(
+            message=f"Standalone enrichment from CSV completed. Enriched {len(enriched_profiles)} profiles.",
+            count=len(enriched_profiles),
+            enriched_profiles=enriched_profiles,
+            csv_file_path=csv_path
+        )
+    except Exception as e:
+        logger.exception(f"Error during standalone enrichment from CSV: {e}")
+        return StandaloneEnrichmentResponse(
+            message="Standalone enrichment from CSV failed.",
+            count=0, # Or count of leads_to_enrich if you want to show attempted count
+            enriched_profiles=[],
+            error=str(e)
+        )
+
+# --- NEW: Standalone Vetting from CSV Endpoint --- #
+@app.post("/actions/vet/csv", response_model=StandaloneVettingResponse, tags=["Actions", "Vetting", "CSV Upload"])
+async def trigger_standalone_vetting_from_csv(
+    file: UploadFile = File(..., description="CSV file containing enriched podcast profiles to vet."),
+    ideal_podcast_description: str = Form(..., description="Description of the ideal podcast for the guest/client."),
+    guest_bio: str = Form(..., description="Biography or background of the guest/client."),
+    guest_talking_points_str: str = Form(..., description="Key talking points (newline or comma separated)."), # Changed name to avoid conflict if model used directly
+    source_campaign_id: Optional[str] = Form(None, description="Optional campaign ID to link this vetting run."),
+    current_user: dict = Depends(get_current_user_from_token) # Protected
+):
+    logger.info(f"User {current_user} - Received standalone vetting request from CSV. Source Campaign ID: {source_campaign_id}")
+    if not file.filename or not file.filename.endswith('.csv'): # Added check for file.filename existence
+        raise HTTPException(status_code=400, detail="Invalid file type or no filename. Please upload a CSV file.")
+
+    vetting_criteria = VettingCriteriaFormData(
+        ideal_podcast_description=ideal_podcast_description,
+        guest_bio=guest_bio,
+        guest_talking_points_str=guest_talking_points_str
+    )
+
+    try:
+        parsed_csv_data = await parse_csv_to_dicts(file)
+        logger.info(f"Successfully parsed {len(parsed_csv_data)} profiles from uploaded CSV for vetting.")
+        
+        # --- NEW: Header Validation --- #
+        if parsed_csv_data:
+            # Define the essential headers needed to even attempt creating an EnrichedPodcastProfile
+            # Adjust this list based on the *truly required* fields in your model or logic
+            required_cols = ['title', 'api_id'] # Example: Add more critical fields as needed
+            csv_headers = list(parsed_csv_data[0].keys()) # Get headers from the first row
+            check_required_headers(csv_headers, required_cols)
+        # --- END Header Validation --- #
+
+    except HTTPException as e: # Re-raise HTTPExceptions from parser or header check
+        raise e
+    except Exception as e:
+        logger.exception(f"Error parsing CSV or checking headers for vetting: {e}")
+        return StandaloneVettingResponse(
+            message="Failed to parse uploaded CSV file or validate headers.",
+            count=0,
+            vetting_results=[],
+            error=f"CSV Parsing/Validation Error: {str(e)}"
+        )
+
+    if not parsed_csv_data:
+        return StandaloneVettingResponse(
+            message="No profiles found in the uploaded CSV or CSV was empty.",
+            count=0,
+            vetting_results=[],
+            error="CSV for vetting contained no data."
+        )
+
+    enriched_profiles_to_vet: List[EnrichedPodcastProfile] = []
+    parsing_errors: List[str] = []
+    error_threshold = 50 # Example: Stop if more than 50 rows fail
+    
+    # --- Define boolean fields and their expected True values ---
+    boolean_fields = {'rss_explicit': ['true', '1', 'yes']} # Add other boolean fields if any
+
+    for i, row_dict in enumerate(parsed_csv_data):
+        # --- NEW: Error Threshold Check ---
+        if len(parsing_errors) >= error_threshold:
+            logger.error(f"Exceeded error threshold ({error_threshold}) while parsing CSV for vetting. Aborting.")
+            parsing_errors.append(f"Processing aborted after {error_threshold} parsing errors.")
+            break # Stop processing more rows
+            
+        try:
+            processed_row = row_dict.copy() # Work on a copy
+            
+            # Convert empty strings to None and handle specific non-numeric strings
+            for key, value in processed_row.items():
+                if isinstance(value, str):
+                    cleaned_value = value.strip()
+                    if cleaned_value == "":
+                        processed_row[key] = None
+                    elif cleaned_value.lower() in ["n/a", "na", "unknown", "-", "none"]:
+                         processed_row[key] = None
+                         
+            # Basic type coercion for common numeric fields (with enhanced cleanup)
+            numeric_fields = ['total_episodes', 'average_duration_seconds', 'publishing_frequency_days',
+                           'listen_score', 'listen_score_global_rank', 'audience_size',
+                           'itunes_rating_average', 'itunes_rating_count',
+                           'spotify_rating_average', 'spotify_rating_count',
+                           'twitter_followers', 'linkedin_connections']
+            for key in numeric_fields:
+                value = processed_row.get(key)
+                if isinstance(value, str):
+                    cleaned_value = value.strip().replace('$', '').replace(',', '') # Remove $ and commas
+                    if cleaned_value:
+                        try:
+                            if '.' in cleaned_value: 
+                                processed_row[key] = float(cleaned_value)
+                            else: 
+                                processed_row[key] = int(cleaned_value)
+                        except ValueError:
+                            logger.warning(f"Could not convert cleaned value '{cleaned_value}' for field '{key}' to number in CSV row {i+1}. Setting to None.")
+                            processed_row[key] = None # Set to None if conversion fails after cleanup
+                    else:
+                         processed_row[key] = None # If value was just whitespace, $, or ,
+
+            # --- NEW: Boolean Field Conversion ---
+            for field, true_values in boolean_fields.items():
+                value = processed_row.get(field)
+                if isinstance(value, str):
+                    cleaned_value = value.strip().lower()
+                    if cleaned_value in true_values:
+                        processed_row[field] = True
+                    elif cleaned_value in ['false', '0', 'no', '']: # Handle false and empty
+                         processed_row[field] = False
+                    else:
+                         processed_row[field] = None # Set to None if not clearly True/False and field allows None
+                         logger.warning(f"Unrecognized boolean value '{value}' for field '{field}' in CSV row {i+1}. Setting to None.")
+                elif value is None and EnrichedPodcastProfile.model_fields[field].is_required():
+                     # Handle case where a required boolean field is missing/None
+                     logger.warning(f"Required boolean field '{field}' is missing or None in CSV row {i+1}. Defaulting to False (or raise error).")
+                     processed_row[field] = False # Or raise error/skip row
+
+            # Attempt to parse stringified lists (refined)
+            list_fields = ['host_names', 'data_sources']
+            for field in list_fields:
+                value = processed_row.get(field)
+                if isinstance(value, str):
+                    cleaned_value = value.strip()
+                    if cleaned_value.startswith('[') and cleaned_value.endswith(']'):
+                        try:
+                            parsed_list = json.loads(cleaned_value)
+                            if isinstance(parsed_list, list): # Ensure it parsed to a list
+                                processed_row[field] = parsed_list
+                            else:
+                                logger.warning(f"Parsed stringified list for field '{field}' in CSV row {i+1}, but result was not a list: {type(parsed_list)}. Setting to None.")
+                                processed_row[field] = None
+                        except json.JSONDecodeError:
+                            logger.warning(f"Could not JSON decode stringified list for field '{field}' in CSV row {i+1}: '{cleaned_value[:50]}...'. Setting to None.")
+                            processed_row[field] = None
+                    elif cleaned_value == "": # Handle empty string for list field
+                         processed_row[field] = None # Or [] if appropriate default
+                    # else: keep original string if it doesn't look like a list
+
+            # Instantiate the Pydantic model using the processed row
+            profile = EnrichedPodcastProfile(**processed_row)
+            enriched_profiles_to_vet.append(profile)
+        except HTTPException: # Should not happen here, but good practice
+             raise
+        except Exception as validation_error: # Catch Pydantic ValidationError or others
+            # Log original data for better debugging
+            err_msg = f"Row {i+1}: Could not parse into EnrichedPodcastProfile. Error: {validation_error}. Original Data: {row_dict}"
+            logger.warning(err_msg)
+            parsing_errors.append(err_msg)
+            # Decide: skip this row or fail the whole request? Skip for now.
+
+    if not enriched_profiles_to_vet and parsed_csv_data: # All rows failed parsing
+         final_error_msg = "All rows in CSV failed validation. Check column names, data types, and required fields. "
+         if parsing_errors:
+              final_error_msg += "First few errors: " + "; ".join(parsing_errors[:3])
+         return StandaloneVettingResponse(
+            message="CSV parsing completed, but no valid enriched profiles could be created.",
+            count=len(parsed_csv_data),
+            vetting_results=[],
+            error=final_error_msg
+        )
+
+    try:
+        vetting_results, csv_path = await vetting_agent_instance.perform_standalone_vetting(
+            enriched_profiles=enriched_profiles_to_vet,
+            ideal_podcast_description=vetting_criteria.ideal_podcast_description,
+            guest_bio=vetting_criteria.guest_bio,
+            guest_talking_points=vetting_criteria.guest_talking_points,
+            source_campaign_id=source_campaign_id
+        )
+        
+        final_message = f"Standalone vetting from CSV completed. Processed {len(enriched_profiles_to_vet)} valid profiles."
+        if parsing_errors:
+            final_message += f" ({len(parsing_errors)} rows from CSV had parsing issues and were skipped.)"
+
+        return StandaloneVettingResponse(
+            message=final_message,
+            count=len(enriched_profiles_to_vet), # Count of successfully parsed and processed profiles
+            vetting_results=vetting_results,
+            csv_file_path=csv_path,
+            error= "; ".join(parsing_errors[:3]) if parsing_errors else None # Include some parsing errors in the main error field if any
+        )
+    except Exception as e:
+        logger.exception(f"Error during standalone vetting from CSV: {e}")
+        return StandaloneVettingResponse(
+            message="Standalone vetting from CSV failed during agent execution.",
+            count=len(enriched_profiles_to_vet),
+            vetting_results=[],
+            error=str(e)
+        )
 
 # --- Old Background Workflow Trigger Endpoint (COMMENTED OUT) --- #
 # @app.post("/campaigns/run_background", status_code=202, tags=["Workflow"])

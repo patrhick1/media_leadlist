@@ -47,13 +47,13 @@ def search_agent_node(state: GraphState) -> GraphState:
         
         if not campaign_config:
              # Handle error: No campaign config found
-             error_msg = "CampaignConfiguration not found in agent state."
-             logger.error(error_msg)
-             agent_state.current_step = "error"
-             agent_state.execution_status = "search_failed_no_config"
-             state['error_message'] = error_msg
-             state['agent_state'] = agent_state
-             return state
+            error_msg = "CampaignConfiguration not found in agent state."
+            logger.error(error_msg)
+            agent_state.current_step = "error"
+            agent_state.execution_status = "search_failed_no_config"
+            state['error_message'] = error_msg
+            state['agent_state'] = agent_state
+            return state
 
         search_type = campaign_config.search_type
 
@@ -69,7 +69,28 @@ def search_agent_node(state: GraphState) -> GraphState:
                 return state
             
             logger.info(f"--- Search Node: Routing to RELATED search for seed: {seed_rss} ---")
-            updated_state = agent.run_related_search(state) # Call the new method
+            # --- PASS PARAMS TO STANDALONE METHOD --- #
+            try:
+                related_leads, csv_path = agent.perform_standalone_related_search(
+                    seed_rss_url=seed_rss,
+                    max_depth=campaign_config.max_depth or 2, # Use config value or default
+                    max_total_results=campaign_config.max_total_results or 50, # Use config value or default
+                    campaign_id_prefix=f"graph_related_{campaign_config.campaign_id}" # Use graph campaign ID
+                )
+                agent_state.leads = related_leads
+                agent_state.search_results_csv_path = csv_path
+                agent_state.execution_status = "related_search_complete" if related_leads else "related_search_complete_no_results"
+                agent_state.current_step = "enrichment" # Set next step here on success
+                state['error_message'] = None
+            except Exception as related_err:
+                 logger.exception(f"Error calling perform_standalone_related_search: {related_err}")
+                 agent_state.current_step = "error"
+                 agent_state.execution_status = "search_failed_agent_execution"
+                 state['error_message'] = f"Related search agent execution failed: {related_err}"
+            # --- END PASS PARAMS --- #
+            state['agent_state'] = agent_state # Update state regardless of inner try/except
+            updated_state = state # Return the modified state
+            # updated_state = agent.run_related_search(state) # Call the new method # OLD CALL
         
         elif search_type == "topic":
              if not campaign_config.target_audience:
@@ -83,7 +104,29 @@ def search_agent_node(state: GraphState) -> GraphState:
                   return state
              
              logger.info("--- Search Node: Routing to TOPIC search based on description ---")
-             updated_state = agent.run_search(state) # Call the existing method
+             # --- PASS PARAMS TO STANDALONE METHOD --- #
+             try:
+                 topic_leads, csv_path = agent.perform_standalone_topic_search(
+                     target_audience=campaign_config.target_audience,
+                     key_messages=campaign_config.key_messages or [], # Use config value or default
+                     num_keywords_to_generate=campaign_config.num_keywords_to_generate or 10,
+                     max_results_per_keyword=campaign_config.max_results_per_keyword or 50,
+                     campaign_id_prefix=f"graph_topic_{campaign_config.campaign_id}" # Use graph campaign ID
+                 )
+                 agent_state.leads = topic_leads
+                 agent_state.search_results_csv_path = csv_path
+                 agent_state.execution_status = "search_complete" if topic_leads else "search_complete_no_results"
+                 agent_state.current_step = "enrichment" # Set next step here on success
+                 state['error_message'] = None
+             except Exception as topic_err:
+                  logger.exception(f"Error calling perform_standalone_topic_search: {topic_err}")
+                  agent_state.current_step = "error"
+                  agent_state.execution_status = "search_failed_agent_execution"
+                  state['error_message'] = f"Topic search agent execution failed: {topic_err}"
+             # --- END PASS PARAMS --- #
+             state['agent_state'] = agent_state # Update state regardless of inner try/except
+             updated_state = state # Return the modified state
+             # updated_state = agent.run_search(state) # Call the existing method # OLD CALL
         
         else:
              # Handle error: Invalid search_type
@@ -229,6 +272,54 @@ def decide_after_search(state: GraphState) -> str:
     )
     return "__end__"  # Fallback to end on unexpected status
 
+# --- NEW: Define decide_after_vetting function ---
+def decide_after_vetting(state: GraphState) -> str:
+    """Decides the next step after the vetting agent node.
+
+    Returns:
+        str: The name of the next node ('crm_export' or '__end__').
+    """
+    agent_state: AgentState = state['agent_state']
+    status = agent_state.execution_status
+    error_message = state.get('error_message')
+    vetting_results = agent_state.vetting_results
+
+    logger.info(f"Deciding after vetting. Status: {status}, Error: {error_message}, Vetting Results Count: {len(vetting_results) if vetting_results else 0}")
+
+    # --- Failure / No-result conditions from vetting step itself ---
+    if (
+        error_message
+        or "failed" in status # Catches various failure statuses from the vetting node
+        or not vetting_results # No vetting results produced
+    ):
+        logger.warning(
+            f"Vetting step failed or yielded no results (Status: {status}). Ending workflow."
+        )
+        return "__end__"
+
+    # --- Success conditions: Check if there are any usable vetting results ---
+    # Example: Check if at least one podcast was successfully vetted (not errored within its result)
+    # And perhaps meets a minimum quality (e.g., not all are 'D' tier or unvetted due to errors)
+    # For simplicity now, if we have any results and no node error, proceed.
+    # A more nuanced check could be:
+    # successful_vets = [vr for vr in vetting_results if not vr.error and vr.quality_tier != "Unvetted"]
+    # if not successful_vets:
+    #     logger.warning("Vetting completed, but no successfully vetted profiles found. Ending.")
+    #     return "__end__"
+    
+    if status == "vetting_complete" and vetting_results: # Assuming "vetting_complete" is set on success
+        logger.info(
+            f"Vetting step successful (Status: {status}). Proceeding to CRM export."
+        )
+        return "crm_export"
+
+    # --- Fallback --- #
+    logger.error(
+        f"Unknown status or condition after vetting node: {status}. Vetting results count: {len(vetting_results) if vetting_results else 0}. Ending workflow as a precaution."
+    )
+    return "__end__"
+# --- END NEW decide_after_vetting function ---
+
 # --- Build the Graph --- #
 def build_graph(checkpointer: Optional[BaseCheckpointSaver] = None):
     """Builds the state machine graph."""
@@ -237,7 +328,7 @@ def build_graph(checkpointer: Optional[BaseCheckpointSaver] = None):
     # Add nodes
     workflow.add_node("search", search_agent_node)
     workflow.add_node("enrichment", enrichment_agent_node)
-    # workflow.add_node("vetting", vetting_agent_node) # Vetting node (kept for reference)
+    workflow.add_node("vetting", vetting_agent_node) # Vetting node added
     workflow.add_node("crm_export", crm_export_node) # CRM node added
     # workflow.add_node("human_review", human_review_node) # Human review node (kept for reference)
 
@@ -247,29 +338,27 @@ def build_graph(checkpointer: Optional[BaseCheckpointSaver] = None):
     # Conditional Edge from Search (Simplified)
     workflow.add_conditional_edges(
         "search",
-        decide_after_search, # Use the new decision function
+        decide_after_search, 
         {
-            "enrichment": "enrichment", # Go to enrichment if search succeeds
-            "__end__": END          # Go to END if search fails or finds nothing
+            "enrichment": "enrichment", 
+            "__end__": END          
         }
     )
 
-    # Normal Edge from Enrichment
-    # workflow.add_edge("enrichment", "vetting") # Original edge to Vetting
-    workflow.add_edge("enrichment", END) # TEMP: Go straight to END after enrichment
+    # Updated Edge from Enrichment to Vetting
+    workflow.add_edge("enrichment", "vetting")
 
-    # Conditional Edge from Vetting (Kept commented for reference)
-    # workflow.add_conditional_edges(
-    #     "vetting",
-    #     decide_after_vetting, # Function to decide next step
-    #     {
-    #         "crm_export": "crm_export", # If approved/good quality
-    #         "human_review": "human_review", # If needs review
-    #         "__end__": END # If rejected or error
-    #     }
-    # )
+    # Conditional Edge from Vetting
+    workflow.add_conditional_edges(
+        "vetting",
+        decide_after_vetting, # Use the new decision function
+        {
+            "crm_export": "crm_export", # If approved/good quality
+            "__end__": END # If rejected or error
+        }
+    )
 
-    # Normal Edge from CRM Export to End (Still needed as crm_export node exists)
+    # Normal Edge from CRM Export to End
     workflow.add_edge("crm_export", END)
 
     # Normal Edge from Human Review to End (Kept commented for reference)
